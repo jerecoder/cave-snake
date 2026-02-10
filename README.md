@@ -1,4 +1,4 @@
-# 🎮 Hackathon ICPC: Desafío Arcade
+# 🎮 ICPC: Desafío Arcade
 
 Buk es sponsor de la [ICPC](https://icpc.global/regionals/finder/TCP) y trae un Arcade.
 Pero esta vez el desafío no es usarlo: es crear el videojuego que estará disponible durante el evento.
@@ -71,9 +71,19 @@ Por defecto:
 
 ---
 
+## ⭐ Criterios de Evaluación
+
+¿Quieres saber cómo se evaluarán los juegos? Revisa los **Criterios de Evaluación** completos en:
+
+👉 **[https://buk-arcade-challenge.icpc.cl/criterios](https://buk-arcade-challenge.icpc.cl/criterios)**
+
+Conoce qué aspectos como la sensación arcade, rejugabilidad, entretención, claridad visual, pulido y creatividad se tomarán en cuenta al evaluar tu juego.
+
+---
+
 ## ⏰ Deadline y Envío
 
-**Deadline:** Domingo 28 de febrero de 2026 a las 23:59 (hora Chile)
+**Deadline:** 25 de febrero de 2026 a las 23:59 (hora Chile)
 
 ### Cómo Enviar
 
@@ -91,7 +101,9 @@ Enviar tu proyecto es fácil:
 
 ¡Eso es todo! 🎉
 
-**Más información del desafío:** [https://arcade.lucasvsj.com/](https://arcade.lucasvsj.com/)
+**Tu juego aparecerá automáticamente en:** [https://buk-arcade-challenge.icpc.cl/](https://buk-arcade-challenge.icpc.cl/)
+
+El sistema sincroniza automáticamente los forks del template y los publica en el sitio.
 
 ---
 
