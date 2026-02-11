@@ -163,9 +163,8 @@ const server = createServer(async (req, res) => {
         const coverHash = createHash('sha256').update(coverBuffer).digest('hex');
         const isChanged = coverHash !== DEFAULT_COVER_SHA256;
 
-        // Check PNG dimensions
+        // Check PNG format
         const { width, height, isPNG } = checkPNGDimensions(coverBuffer);
-        const isValidSize = width === 800 && height === 600;
 
         let message = '';
         let isValid = false;
@@ -174,10 +173,8 @@ const server = createServer(async (req, res) => {
           message = 'cover.png is not a valid PNG file';
         } else if (!isChanged) {
           message = 'Default cover detected';
-        } else if (!isValidSize) {
-          message = `Cover is ${width}x${height}, must be 800x600`;
         } else {
-          message = 'Custom cover provided';
+          message = `Custom cover provided (${width}x${height})`;
           isValid = true;
         }
 
@@ -188,7 +185,6 @@ const server = createServer(async (req, res) => {
           isPNG: isPNG,
           width: width,
           height: height,
-          isValidSize: isValidSize,
           isValid: isValid,
           message: message
         }));

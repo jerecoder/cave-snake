@@ -90,7 +90,7 @@ Conoce qué aspectos como la sensación arcade, rejugabilidad, entretención, cl
 Enviar tu proyecto es fácil:
 
 1. **Guarda tus cambios** - Asegúrate de que `game.js`, `metadata.json` y `cover.png` estén listos
-   - **Importante:** Tu juego debe incluir un archivo `cover.png` personalizado (800x600 píxeles) que muestre tu juego
+   - **Importante:** Tu juego debe incluir un archivo `cover.png` personalizado que muestre tu juego
 2. **Git push** - Sube tu código a tu repositorio:
    ```bash
    git add .
@@ -122,7 +122,7 @@ Esto inicia un servidor en `http://localhost:3000` con verificación de restricc
 ### 3. Construye Tu Juego
 - **Edita `game.js`** - Escribe el código de tu juego arcade
 - **Actualiza `metadata.json`** - Define el nombre y descripción de tu juego
-- **Crea `cover.png`** - Diseña una imagen de portada de 800x600 píxeles para tu juego
+- **Crea `cover.png`** - Diseña una imagen de portada PNG para tu juego
 - **Observa el servidor de desarrollo** - Muestra actualizaciones en vivo del tamaño de archivo y restricciones
 
 ---
