@@ -19,7 +19,7 @@ for (const [code, keys] of Object.entries(ARCADE_CONTROLS)) {
 const SCREEN_W = 800;
 const SCREEN_H = 600;
 
-const GRID_W = 10; // fixed width
+const GRID_W = 25; // fixed width
 const CHUNK_H = 12; // rows added each time (keep EVEN to ensure clean exits)
 const START_CHUNKS = 1; // initial revealed chunks
 const ADD_CHUNKS = 1; // chunks revealed when you complete the current area
