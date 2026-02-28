@@ -1,4 +1,4 @@
 {
-  "game_name": "Cave Snake",
-  "description": "Snake con rastro permanente: completa todas las casillas libres para revelar mas mapa hacia arriba. Cada colision te respawnea en el ultimo chunk desbloqueado."
+  "game_name": "Cave Ray",
+  "description": "FPS retro estilo raycasting: sobrevive 3 pisos, consigue mejoras, derrota al boss final y escapa por el portal."
 }
