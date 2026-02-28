@@ -17,7 +17,6 @@
   const BOSS_BLIND_R = 11.2;
   const BOSS_BLIND_GAIN = 0.92;
   const BOSS_MIND_R = 6.5;
-  const BOSS_MIND_DPS = 4.5;
   const BOSS_JUMPSCARE_RANGE = 6.4;
   const BOSS_JUMPSCARE_CD = 4.6;
   const BOSS_JUMPSCARE_DUR = 0.58;
@@ -161,37 +160,56 @@
   const audio = (() => {
     let ctxA = null;
     let master = null;
+    let musicBus1 = null;
+    let musicBus2 = null;
+    let fxDry = null;
+    let fxRev = null;
+    let fxCrush = null;
+    let crushAmt = 0;
+    let crushLastL = 0;
+    let crushLastR = 0;
+    let crushPhase = 0;
     let threatCd = 0;
     let stepCd = 0;
     let hurtUntil = 0;
     let musicUnlocked = false;
     let musicTrack = "none";
-    let musicNow = null;
-    const musicNormal = makeMusic([
-      "/music/icpc%20challenge.mp3",
-      "music/icpc%20challenge.mp3",
-      "/music/icpc%20challenge.wav",
-      "music/icpc%20challenge.wav",
-    ], 0.34);
-    const musicFinal = makeMusic([
-      "/music/tourist.mp3",
-      "music/tourist.mp3",
-      "/music/tourist.wav",
-      "music/tourist.wav",
-    ], 0.34);
+    let musicTimer = 0;
+    let musicSeq = null;
+    let musicSeq2 = null;
+    let musicEvtI = 0;
+    let musicEvtI2 = 0;
+    let musicEvtTick = 0;
+    let musicEvtTick2 = 0;
+    let musicLoopStart = 0;
+    let musicLoopStart2 = 0;
+    let musicLoopDur = 0;
+    let musicLoopDur2 = 0;
+    const MUSIC_BPM = 120;
+    const MUSIC_TPB = 96;
+    const MUSIC_SPT = 60 / (MUSIC_BPM * MUSIC_TPB);
+    const MUSIC_LOOK = 0.20;
+    const MUSIC_SHIFT_NORM = 0;
+    const MUSIC_SHIFT_FINAL = 0;
+    const MUSIC_GAIN = 6.0;
+    const LOOP_TICKS_NORM = 13680;
+    const LOOP_TICKS_FINAL = 13728;
+    const LOOP_TICKS_COMMON = LOOP_TICKS_NORM > LOOP_TICKS_FINAL ? LOOP_TICKS_NORM : LOOP_TICKS_FINAL;
+    const SEQ_NORM = [0, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 144, 48, 34, 48, 48, 30, 144, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 96, 48, 32, 48, 48, 34, 192, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 144, 48, 34, 48, 48, 30, 144, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 96, 48, 32, 48, 48, 34, 192, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 144, 48, 34, 48, 48, 30, 144, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 96, 48, 32, 48, 48, 34, 192, 48, 40, 48, 48, 35, 48, 48, 43, 48, 48, 40, 48, 48, 47, 48, 48, 43, 48, 48, 40, 48, 48, 43, 48, 48, 42, 48, 48, 37, 144, 48, 39, 48, 48, 35, 144, 48, 40, 48, 48, 35, 48, 48, 43, 48, 48, 40, 48, 48, 47, 48, 48, 43, 48, 48, 40, 48, 48, 43, 48, 48, 42, 48, 48, 37, 96, 48, 37, 48, 48, 39, 192, 48, 40, 48, 48, 35, 48, 48, 43, 48, 48, 40, 48, 48, 47, 48, 48, 43, 48, 48, 40, 48, 48, 43, 48, 48, 42, 48, 48, 37, 144, 48, 39, 48, 48, 35, 144, 48, 40, 48, 48, 35, 48, 48, 43, 48, 48, 40, 48, 48, 47, 48, 48, 43, 48, 48, 40, 48, 48, 43, 48, 48, 42, 48, 48, 37, 96, 48, 37, 48, 48, 39, 192, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 144, 48, 34, 48, 48, 30, 144, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 96, 48, 32, 48, 48, 34, 192, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 144, 48, 34, 48, 48, 30, 144, 48, 35, 48, 48, 30, 48, 48, 38, 48, 48, 35, 48, 48, 42, 48, 48, 38, 48, 48, 35, 48, 48, 38, 48, 48, 37, 48, 48, 32, 96, 48, 32, 48, 48, 34, 192, 48, 40, 48, 48, 35, 48, 48, 43, 48, 48, 40, 48, 48, 47, 48, 48, 43, 48, 48, 40, 48, 48, 43, 48, 48, 42, 48, 48, 37, 144, 48, 39, 48, 48, 35, 144, 48, 40, 48, 48, 35, 48, 48, 43, 48, 48, 40, 48, 48, 47, 48, 48, 43, 48, 48, 40, 48, 48, 43, 48, 48, 42, 48, 48, 37, 96, 48, 37, 48, 48, 39, 192, 48, 40, 48, 48, 35, 48, 48, 43, 48, 48, 40, 48, 48, 47, 48, 48, 43, 48, 48, 40, 48, 48, 43, 48, 48, 42, 48, 48, 37, 144, 48, 39, 48, 48, 35, 144, 48, 40, 48, 48, 35, 48, 48, 43, 48, 48, 40, 48, 48, 47, 48, 48, 43, 48, 48, 40, 48, 48, 43, 48, 48, 42, 48, 48, 37, 96, 48, 37, 48, 48, 39];
+    const SEQ_FINAL = [1536, 96, 59, 96, 96, 66, 192, 48, 64, 48, 48, 62, 48, 96, 61, 192, 96, 58, 288, 72, 66, 96, 96, 66, 96, 48, 64, 48, 48, 62, 48, 96, 61, 192, 96, 58, 192, 96, 59, 96, 96, 66, 192, 48, 64, 48, 48, 62, 48, 96, 61, 192, 96, 58, 288, 72, 66, 96, 96, 66, 96, 48, 64, 48, 48, 62, 48, 96, 61, 192, 96, 58, 192, 96, 64, 96, 96, 71, 192, 48, 69, 48, 48, 67, 48, 96, 66, 192, 96, 63, 288, 72, 71, 96, 96, 71, 96, 48, 69, 48, 48, 67, 48, 96, 66, 192, 96, 63, 192, 96, 64, 96, 96, 71, 192, 48, 69, 48, 48, 67, 48, 96, 66, 192, 96, 63, 288, 72, 71, 96, 96, 71, 96, 48, 69, 48, 48, 67, 48, 96, 66, 192, 96, 63, 192, 96, 59, 96, 96, 66, 192, 48, 64, 48, 48, 62, 48, 96, 61, 192, 96, 58, 288, 72, 66, 96, 96, 66, 96, 48, 64, 48, 48, 62, 48, 96, 61, 192, 96, 58, 192, 96, 59, 96, 96, 66, 192, 48, 64, 48, 48, 62, 48, 96, 61, 192, 96, 58, 288, 72, 66, 96, 96, 66, 96, 48, 64, 48, 48, 62, 48, 96, 61, 192, 96, 58, 192, 96, 64, 96, 96, 71, 192, 48, 69, 48, 48, 67, 48, 96, 66, 192, 96, 63, 288, 72, 71, 96, 96, 71, 96, 48, 69, 48, 48, 67, 48, 96, 66, 192, 96, 63, 192, 96, 64, 96, 96, 71, 192, 48, 69, 48, 48, 67, 48, 96, 66, 192, 96, 63, 288, 72, 71, 96, 96, 71, 96, 48, 69, 48, 48, 67, 48, 96, 66, 192, 96, 63];
 
-    function makeMusic(paths, volume) {
-      const el = new Audio();
-      el.loop = true;
-      el.preload = "auto";
-      el.volume = volume;
-      let idx = 0;
-      el.onerror = () => {
-        idx++;
-        if (idx < paths.length) el.src = paths[idx];
-      };
-      el.src = paths[0];
-      return el;
+    function makeIR(sec, decay) {
+      if (!ctxA) return null;
+      const len = Math.max(1, (ctxA.sampleRate * sec) | 0);
+      const b = ctxA.createBuffer(2, len, ctxA.sampleRate);
+      for (let ch = 0; ch < 2; ch++) {
+        const d = b.getChannelData(ch);
+        for (let i = 0; i < len; i++) {
+          const t = i / len;
+          d[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, decay);
+        }
+      }
+      return b;
     }
 
     function ensure() {
@@ -201,7 +219,60 @@
       ctxA = new AC();
       master = ctxA.createGain();
       master.gain.value = 0.34;
-      master.connect(ctxA.destination);
+      fxDry = ctxA.createGain();
+      fxRev = ctxA.createGain();
+      fxCrush = ctxA.createGain();
+      fxDry.gain.value = 1;
+      fxRev.gain.value = 0;
+      fxCrush.gain.value = 0;
+
+      const rev = ctxA.createConvolver();
+      rev.buffer = makeIR(0.72, 2.8);
+      rev.normalize = true;
+
+      master.connect(fxDry);
+      fxDry.connect(ctxA.destination);
+      master.connect(rev);
+      rev.connect(fxRev);
+      fxRev.connect(ctxA.destination);
+
+      if (ctxA.createScriptProcessor) {
+        const crushNode = ctxA.createScriptProcessor(1024, 2, 2);
+        crushNode.onaudioprocess = (ev) => {
+          const iL = ev.inputBuffer.getChannelData(0);
+          const iR = ev.inputBuffer.numberOfChannels > 1
+            ? ev.inputBuffer.getChannelData(1)
+            : iL;
+          const oL = ev.outputBuffer.getChannelData(0);
+          const oR = ev.outputBuffer.getChannelData(1);
+
+          const a = clamp(crushAmt, 0, 1);
+          const hold = 1 + ((a * 42) | 0);
+          const bits = 11 - ((a * 9) | 0); // 11 -> 2 bits
+          const q = 1 << Math.max(1, bits - 1);
+          for (let i = 0; i < oL.length; i++) {
+            if (crushPhase++ % hold === 0) {
+              crushLastL = Math.round(iL[i] * q) / q;
+              crushLastR = Math.round(iR[i] * q) / q;
+            }
+            oL[i] = crushLastL;
+            oR[i] = crushLastR;
+          }
+        };
+        master.connect(crushNode);
+        crushNode.connect(fxCrush);
+        fxCrush.connect(ctxA.destination);
+      }
+
+      musicBus1 = ctxA.createGain();
+      musicBus2 = ctxA.createGain();
+      const musicEq1 = ctxA.createBiquadFilter();
+      musicEq1.type = "highshelf";
+      musicEq1.frequency.value = 1500;
+      musicEq1.gain.value = -16;
+      musicBus1.connect(musicEq1);
+      musicEq1.connect(master);
+      musicBus2.connect(master);
     }
 
     function resume() {
@@ -209,43 +280,128 @@
       if (ctxA && ctxA.state === "suspended") ctxA.resume().catch(() => { });
     }
 
-    function musicSrc() {
-      if (musicTrack === "normal") return musicNormal;
-      if (musicTrack === "final") return musicFinal;
-      return null;
+    function midiHz(m) {
+      return 440 * Math.pow(2, (m - 69) / 12);
     }
 
-    function playMusic(el) {
-      const p = el.play();
-      if (p && p.catch) p.catch(() => { });
+    function stopMusicLoop() {
+      if (musicTimer) {
+        clearInterval(musicTimer);
+        musicTimer = 0;
+      }
+      musicSeq = null;
+      musicSeq2 = null;
+      musicEvtI = 0;
+      musicEvtI2 = 0;
+      musicEvtTick = 0;
+      musicEvtTick2 = 0;
+    }
+
+    function musicSchedule() {
+      if (!ctxA || !master || !musicUnlocked || !musicSeq) return;
+      const now = ctxA.currentTime;
+      while ((musicLoopStart + musicLoopDur) <= now) {
+        musicLoopStart += musicLoopDur;
+        musicEvtI = 0;
+        musicEvtTick = 0;
+      }
+      const look = now + MUSIC_LOOK;
+      while (musicEvtI < musicSeq.length) {
+        const dt = musicSeq[musicEvtI];
+        const durTick = musicSeq[musicEvtI + 1];
+        const note = musicSeq[musicEvtI + 2];
+        const evTick = musicEvtTick + dt;
+        const evTime = musicLoopStart + evTick * MUSIC_SPT;
+        if (evTime > look) break;
+
+        const delay = evTime - now;
+        if (delay > -0.08) {
+          const f = midiHz(note);
+          const dur = durTick * MUSIC_SPT;
+          tone(f, dur, 0.075 * MUSIC_GAIN, "square", Math.max(0, delay), true, musicBus1);
+        }
+
+        musicEvtTick = evTick;
+        musicEvtI += 3;
+      }
+
+      if (!musicSeq2) return;
+      while ((musicLoopStart2 + musicLoopDur2) <= now) {
+        musicLoopStart2 += musicLoopDur2;
+        musicEvtI2 = 0;
+        musicEvtTick2 = 0;
+      }
+      while (musicEvtI2 < musicSeq2.length) {
+        const dt = musicSeq2[musicEvtI2];
+        const durTick = musicSeq2[musicEvtI2 + 1];
+        const note = musicSeq2[musicEvtI2 + 2];
+        const evTick = musicEvtTick2 + dt;
+        const evTime = musicLoopStart2 + evTick * MUSIC_SPT;
+        if (evTime > look) break;
+
+        const delay = evTime - now;
+        if (delay > -0.08) {
+          const f = midiHz(note);
+          const dur = durTick * MUSIC_SPT;
+          tone(f, dur, 0.085 * MUSIC_GAIN, "triangle", Math.max(0, delay), true, musicBus2);
+        }
+
+        musicEvtTick2 = evTick;
+        musicEvtI2 += 3;
+      }
+    }
+
+    function startMusicLoop(track) {
+      if (!musicUnlocked || track === "none") {
+        stopMusicLoop();
+        return;
+      }
+      const seqA = SEQ_NORM;
+      const seqB = SEQ_FINAL;
+      if (musicSeq === seqA && musicSeq2 === seqB && musicTimer) return;
+      stopMusicLoop();
+      musicSeq = seqA;
+      musicSeq2 = seqB;
+      const loopDur = LOOP_TICKS_COMMON * MUSIC_SPT;
+      musicLoopDur = loopDur;
+      musicLoopDur2 = loopDur;
+      musicLoopStart = (ctxA ? ctxA.currentTime : 0) + 0.02;
+      musicLoopStart2 = musicLoopStart;
+      musicTimer = setInterval(musicSchedule, 50);
+      musicSchedule();
     }
 
     function syncMusic() {
-      const next = musicSrc();
-      if (musicNow !== next) {
-        if (musicNow) {
-          musicNow.pause();
-          musicNow.currentTime = 0;
-        }
-        musicNow = next;
+      if (!musicUnlocked || musicTrack === "none") {
+        stopMusicLoop();
+        return;
       }
-      if (!musicNow || !musicUnlocked) return;
-      playMusic(musicNow);
+      resume();
+      startMusicLoop(musicTrack);
     }
 
-    function tone(freq, dur, vol, type, delay) {
+    function tone(freq, dur, vol, type, delay, sustain, outNode) {
       if (!ctxA || !master) return;
       const t = ctxA.currentTime + (delay || 0);
       const o = ctxA.createOscillator();
       const gg = ctxA.createGain();
+      const d = Math.max(0.006, dur || 0.06);
+      const v = Math.max(0.0001, vol || 0.08);
       o.type = type || "square";
       o.frequency.setValueAtTime(freq, t);
-      gg.gain.setValueAtTime(Math.max(0.0001, vol || 0.08), t);
-      gg.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      gg.gain.setValueAtTime(v, t);
+      if (sustain) {
+        const rel = Math.min(0.02, Math.max(0.005, d * 0.18));
+        const hold = t + d - rel;
+        gg.gain.setValueAtTime(v, hold);
+        gg.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      } else {
+        gg.gain.exponentialRampToValueAtTime(0.0001, t + d);
+      }
       o.connect(gg);
-      gg.connect(master);
+      gg.connect(outNode || master);
       o.start(t);
-      o.stop(t + dur);
+      o.stop(t + d + 0.002);
     }
 
     function threat(level, dt) {
@@ -329,6 +485,15 @@
       },
       pickup() { tone(900, 0.08, 0.10, "square"); tone(1220, 0.10, 0.08, "square"); },
       click() { tone(650, 0.06, 0.08, "square"); },
+      bossFx(level) {
+        if (!ctxA || !master || !fxDry || !fxRev || !fxCrush) return;
+        const a = Math.pow(clamp(level, 0, 1), 0.65);
+        crushAmt = a;
+        const t = ctxA.currentTime;
+        fxDry.gain.setTargetAtTime(1 - a * 0.62, t, 0.06);
+        fxRev.gain.setTargetAtTime(a * 0.90, t, 0.07);
+        fxCrush.gain.setTargetAtTime(a * 0.72, t, 0.05);
+      },
       footstep,
       threat,
     };
@@ -1051,7 +1216,7 @@
   let mgPickup = { x: 0, y: 0, t: 0, active: false };
   let exitGate = { x: 0, y: 0, open: false, pulse: 0 };
   let stairs = { x: 0, y: 0, active: false, pulse: 0 };
-  let boss = { x: 0, y: 0, ax: 0, ay: 0, hp: 0, max: 0, alive: false, hurt: 0, t: 0, cd: 0, cast: 0, volley: 1 };
+  let boss = { x: 0, y: 0, ax: 0, ay: 0, hp: 0, max: 0, alive: false, hurt: 0, t: 0, cast: 0, volley: 1 };
   const fireballs = [];
   let jumpscareT = 0;
   let jumpscareCd = 0;
@@ -1171,7 +1336,6 @@
     boss.hp = BOSS_HP;
     boss.hurt = 0;
     boss.t = 0;
-    boss.cd = 0;
     boss.cast = 0;
     boss.volley = 1;
     boss.spr = bossImg;
@@ -1205,6 +1369,34 @@
       sx: RW >> 1,
       sy: lastHorizon,
     });
+  }
+
+  function tryBossTeleportBehindPlayer() {
+    if (!boss.alive) return false;
+    const fx = Math.cos(player.a), fy = Math.sin(player.a);
+    const rx = -fy, ry = fx;
+    const base = BOSS_R + PLAYER_R + 0.40;
+    const dists = [base + 0.28, base, Math.max(0.8, base - 0.22), base + 0.52];
+    const offs = [0, 0.52, -0.52, 1.0, -1.0, 1.45, -1.45];
+    const minD2 = (BOSS_R + PLAYER_R + 0.05) * (BOSS_R + PLAYER_R + 0.05);
+
+    for (let di = 0; di < dists.length; di++) {
+      const dist = dists[di];
+      for (let oi = 0; oi < offs.length; oi++) {
+        const off = offs[oi];
+        const nx = player.x - fx * dist + rx * off;
+        const ny = player.y - fy * dist + ry * off;
+        const dx = nx - player.x, dy = ny - player.y;
+        if (dx * dx + dy * dy < minD2) continue;
+        if (!canStand(nx, ny, BOSS_R)) continue;
+        boss.x = nx;
+        boss.y = ny;
+        boss.ax = boss.ax * 0.55 + nx * 0.45;
+        boss.ay = boss.ay * 0.55 + ny * 0.45;
+        return true;
+      }
+    }
+    return false;
   }
 
   function updateBoss(dt) {
@@ -1245,22 +1437,13 @@
       }
     }
 
-    // Telepathic drain: stronger at longer distance from the boss.
+    // Telepathic pressure (no HP damage): visual stress while inside aura.
     if (bd < BOSS_MIND_R) {
       const farT = clamp(bd / BOSS_MIND_R, 0, 1); // 0 near boss, 1 near edge of aura
       const rage = 1 - clamp(boss.hp / (boss.max || 1), 0, 1);
-      const dps = BOSS_MIND_DPS * (0.25 + 1.05 * farT * farT) * (0.80 + 0.90 * rage);
-      player.hp -= dps * dt;
-      player.hurt = Math.min(0.35, player.hurt + dt * (0.12 + 0.22 * farT));
+      const press = (0.25 + 1.05 * farT * farT) * (0.80 + 0.90 * rage);
+      player.hurt = Math.min(0.35, player.hurt + dt * (0.05 + 0.08 * press));
       shake = Math.max(shake, 0.04 + 0.05 * farT);
-
-      boss.cd -= dt;
-      if (boss.cd <= 0) {
-        audio.hurt();
-        boss.cd = 0.40 - 0.16 * farT;
-      }
-    } else {
-      boss.cd = 0;
     }
 
     // Jumpscare trigger: frequent enough to feel threatening when boss is near.
@@ -1270,9 +1453,13 @@
       const nearT = 1 - clamp(bd / BOSS_JUMPSCARE_RANGE, 0, 1);
       jumpscareCd = BOSS_JUMPSCARE_CD * (0.72 - 0.30 * nearT) * (1 - 0.35 * rage);
       jumpscareT = BOSS_JUMPSCARE_DUR;
+      const dmg = 8 + 5 * nearT + 4 * rage;
+      player.hp -= dmg;
+      player.hurt = Math.min(0.55, player.hurt + 0.26 + 0.20 * nearT);
       player.dizzy = Math.min(1, player.dizzy + 0.46);
       player.blind = Math.min(1, player.blind + 0.30);
-      shake = Math.max(shake, 0.30);
+      shake = Math.max(shake, 0.30 + 0.16 * nearT);
+      audio.hurt();
       audio.jumpscare();
     }
   }
@@ -1593,6 +1780,8 @@
           setNote("BOSS DOWN - EXIT OPEN", 3.0);
           audio.kill();
           shake = Math.max(shake, 0.18);
+        } else {
+          tryBossTeleportBehindPlayer();
         }
       } else if (bestI >= 0) {
         const e = enemies[bestI];
@@ -1629,16 +1818,26 @@
             audio.pickup();
           }
 
+          const bossRage = (floorIndex === FLOOR_COUNT - 1 && boss.alive)
+            ? (1 - clamp(boss.hp / (boss.max || 1), 0, 1))
+            : 0;
           const spawnCap = (floorIndex === FLOOR_COUNT - 1)
-            ? 3
+            ? (boss.alive
+              // Final floor pressure ramps hard as boss takes damage.
+              ? (3 + ((bossRage * 18) | 0))
+              : 2)
             : (BASE_ENEMIES - 1 + floorIndex + (wave >> 2));
+
+          let spawnBurst = 1;
+          if (floorIndex === FLOOR_COUNT - 1 && boss.alive) {
+            spawnBurst += 1 + ((bossRage * 3) | 0); // 2..5 spawns as rage rises
+            if (score > 0 && (score % 4) === 0) spawnBurst += 1 + ((bossRage * 2) | 0);
+          }
           if (score > 0 && (score % 6) === 0) {
             wave++;
-            spawnEnemy();
-            if (enemies.length < spawnCap) spawnEnemy();
-          } else if (enemies.length < spawnCap) {
-            spawnEnemy();
+            spawnBurst++;
           }
+          while (spawnBurst-- > 0 && enemies.length < spawnCap) spawnEnemy();
         }
       }
     } else {
@@ -2761,6 +2960,7 @@
       updateExit(dt);
 
       let nearestD2 = 1e9;
+      let bossFxLevel = 0;
       for (let i = 0; i < enemies.length; i++) {
         const e = enemies[i];
         const dx = e.x - player.x, dy = e.y - player.y;
@@ -2771,6 +2971,7 @@
         const dx = boss.x - player.x, dy = boss.y - player.y;
         const d2 = dx * dx + dy * dy;
         if (d2 < nearestD2) nearestD2 = d2;
+        bossFxLevel = clamp((12 - Math.sqrt(d2)) / 12, 0, 1);
       }
       if (nearestD2 < 64) {
         threatLevel = clamp((8 - Math.sqrt(nearestD2)) / 7, 0, 1);
@@ -2779,6 +2980,7 @@
         threatLevel = 0;
         audio.threat(0, dt);
       }
+      audio.bossFx(bossFxLevel);
 
       if (player.hp <= 0) {
         player.hp = 0;
@@ -2788,6 +2990,7 @@
     } else {
       threatLevel = 0;
       audio.threat(0, dt);
+      audio.bossFx(0);
       audio.footstep(0, dt);
       if (player.dizzy > 0) player.dizzy = Math.max(0, player.dizzy - dt * 0.8);
       if (player.blind > 0) player.blind = Math.max(0, player.blind - dt * 0.8);
