@@ -16,7 +16,7 @@
   const BOSS_HP = 48;
   const BOSS_BLIND_R = 11.2;
   const BOSS_BLIND_GAIN = 0.92;
-  const BOSS_MIND_R = 13.0;
+  const BOSS_MIND_R = 6.5;
   const BOSS_MIND_DPS = 4.5;
   const BOSS_JUMPSCARE_RANGE = 6.4;
   const BOSS_JUMPSCARE_CD = 4.6;
@@ -849,14 +849,16 @@
   let bossImg = enemyImg;
   let bossImgHurt = enemyImgHurt;
   const crookVariants = [];
-  const CROOK_FILES = [
-    "74da8508af38dfcc.jpg",
-    "7cf0a442d4071e87.jpg",
-    "b450806e36caa423.jpg",
-    "d429161cb219e72d.jpg",
-    "ec7b2b5bd30c511a.jpg",
-    "umnik.jpg",
+  const EMBED_BOSS = "data:image/webp;base64,UklGRrABAABXRUJQVlA4IKQBAACQCgCdASoiADoAPvFqqU4ppqQjMBVdUTAeCWYArk9okNUnsF4Z_IA8wc2hFMOOrtY_lpcynBy24Qk8uRKraM5AAfsY5Oz_Y0ra8iJWmchCwEBpVex3yexTNIPyy1AA_tdTp3Pbft4gUsO_aO9Jgx3B9iwPJznwrKchwh9ioWL8JUPWkPgiACGIHs3X9Q6QIWGTM1aGcCZR70G4drie8YeLAujZBUKq0V8QyqKX1GFkPyGlIi_1UbTjKCA4s3xPG7gz1pzf-52UBY-W-HSk_w7ZVugrbVSb8NCkk5lWiMu_sE5K6ac8D3GfCZrfnI05VXfkmI8kExpqyM5mDx2oVX_xCJn-UzdifuLhxjYo_3hiSTP4GUgnytn_yDYZOxOMl7SYzgo1uaNVOLOwoXmnboigcb0TPb0AvBVMnhjQvURnNlI8oAn2CdkNLwyFzUJVWWTqBwq9TmcCY1ekS6132EPxx5C9y9sPHL9BwjfynIvNjmNSbyYtHiKKhXypbXN6zjN3JDYpYyC6L5HNyvbnqrZ3_5N53kq7Ukru6uBKzs9U9asAAAA=";
+  const EMBED_CROOKS = [
+    "data:image/webp;base64,UklGRnoCAABXRUJQVlA4IG4CAADwDQCdASoiADoAPvVkqU6qpSOiMrbZmVAeiWwAuzM0cZ_xA7N21zwGm77v_QQMicxyJIaWJl9XTB52_EZVcb8fD4YSXHbOKc-U7ftKnB3JUghtTxp52SMVawZv5wtTuNwPKCZk7RfLN2EqkE9Ns4StdUXn1Jq6CUAA_vHgwVrcflwgbPJUVr3lDcIUo43ljXe6Uw8hFmVIAYyU5Q1LEHBH6pdRa42HWdgiAiPwAhQGLYPpCphWnibHMkDZzQE0SZl9Ix_ROSuEs6Vs3Af082RmSDIYKhKHWK_iLSjTKpfaIsGAzHLMVF0_wkeFEfYHD49ng1Bv-zTmzReyE6_aBLVpVathyZUVRX6k77gxLSIgi5Ru_dSDSbj7p7oKkxPv3KaNIemUSHyTGLpbxc1xioK7-XZgrWm66e5E6z4_doJ0Wl5okJwchwvvF-EYp88rMXU50V8RWiEHs0W779uddCp10YLzl-Ll2Uwhhimty2TT7ozaCvYYzbctPhS6pv8uUKy02VI1c7pmnO85aVBN-WlTk2zjTSA9s1V-zjnRnUjMDIiAo5sKFelK0ZuWAudCOJgiaEikPHWNZa7uPF0z9oVu90Wv7aAtp00n3dVIhCLJYtQm6bxk4c98_LL56FbdK-zlmkuR97yQjN9NzP7w5yaN5x7J-p9_syfafWb5xuboVBMoo7RE2-nGw3LO4W1Yd4niHi7x6jKvVDCVDfo3JsMaocM8DR3a8nfOO7yAnOoIfoPOiSX83LSY-OYrKmt6zsAkjGFO-iXDieFSy1q_pbHPgEfSkpbWI7OiTMd2YRNs6aNhuqLSXakwCQgCgqAA",
+    "data:image/webp;base64,UklGRkYCAABXRUJQVlA4IDoCAADQCwCdASoiADoAPvViqE6qpSOiMBqqqVAeiWwAv3GB1t6MlONmt2E43Y7eW_pwmkToH83MPjm5SG1STbUWL1i0AUOOezkxpm0Ne8AZi888YoYpzsGo0WW_jwsqfTBXCwn2VL_wSBQAAP7DTGeo4pIzeYAOs3UvCO33WynWYH8FJROOsA6tV9TZU1tJpVxnv-jD_-GHPv-TgJ5oXfyLdZaNr3ybRuXu4OlKwfh1MF7tpUArBp7yFQFBQuRueN8MNNsMLI0ZoJe76jMsPIQR-j5L_Eq9iS59Z85EMUIXT2n917jjiXzJknBou1Pv8g-LrX3Oqb6GcX9O5c8a37H-o3ELqzxkxvRwY6tfQkWPwLEm6GYmopMZ78RJK-ZEu1SG5YWowustHaH14V8MfpwCJO8BInYkNceZ5quOH_-V3MwKR6qQY55bV4WS7D7LL8slIb_jGIvbBgTVkuQ7H7YkgbSoYfYLbeeLDUr6H9Jy4OrNS992VHhjAU_pVRpf62QaR0U0RWNZ-SaoT3aDQHzHHHhrIjD5kLbpJxk6lGROAzUP27rOt--CHZCGIclCuyIKj0trHJOQJf8YHOpTWIXdU9UCoqG4pNb_7lSNoAgov2oL_zAJQBMcPnXbH8-aGMHIzYUblfwr6LyfWnElm2mB5t99dBZ9p_HB9kf8X5PUZBg0tF4O4bAOOixMFFFQZBNJyIqQrBCunf9I9Qe37s7o_fmofyYkQPOdPHUMffGo8oM6EghWqC69gVvzEAA=",
+    "data:image/webp;base64,UklGRogCAABXRUJQVlA4IHwCAACQDACdASoiADoAPvFYqk4ppKQiMrtpmTAeCWwAnTLexWCJNXcM1thM2Dw2VTnQuvhB7kPWh4biL2VPMLXgCiiwUFAaVU7PEV7YP-N0jF_ui_YqAYAYpnXWNS6Wlha135nuUYo9_n5BHPuHVKbAAP1mSdhd4egYvKiBrpS27BWgR803u2q1yPkfeNzOVz8JbOYiEOpVE-_TRVoZGDNjXXT1mmM1mBxbFRDj5GiZd-6RzoJiiNUj0Ik_A7UGBWh-ZIY2_KC3smNohNymHySQb-PzaFWudmb0FAhKbWDtm1dj615awuIeyNeP1532Ci3IQn1aJO2-mtJ1_JE1yk9U2vbFZJkFFg5-edt4YOXcztQYWg4tIHZ_1B7JkGUucxXFBu9LmtOHy1uhVeqtWJUNGBGNlsUJYTW-nW8D_4pXZl5lH91vG-QZ4B04MM0U6gDSjdUsB3H57DpIVh_6lK46-j8FufOjceLLXA3QARrLbuE5Whtw9qVgPD-YVTmrhXGcmf4RVDoIf4RVM15KKqd97nL-M3Y5TE3sRVJORpme1WFt6qltkMN1ipKqqtvugtoc-hTWUHKskjN2XVh4_6zS9AnMxwWd0AM_1t1tcd0DOdfA3GpFwZH9vCL_yXPc3y0SXfsZPYV25yLhKh-NuZM41QHReEKofuMqaSnPFk5HpvfldD07yuo8Lza-Yg8e__t25X6y18Zkn83nVUlUAS4nJ-zqL-EfoHbc2pt8cDK_E3zS7r897BYYl7MJFeQHrq7DD8cthncllY22nYFRMQgnQDt9axqzHb8Y06g_fe-hi4WwFJRfXgvpoCQPl4ZzLd9qdXk6z9P2UHqf9U5pAAA",
+    "data:image/webp;base64,UklGRmoCAABXRUJQVlA4IF4CAABwDACdASoiADoAPu1iqU4ppaQiLVme2TAdiWkAE565bs_jiBHh7h1WBNE8kn1ihDQUWqXesvl7VQaVsa5Ff7dprKAVwahJEduRtz5xKepzAmkj6KixReF4MnGJBTM3u4UvRrsvDOc0v0btIFAA_vm_p_nUNoWYgf-I4ns7yFxMe88kWASQvjPov7-QZYicwxZPKjWDk_oxG9kGJZtvHTg3eM8Zhsa0SrZX4Om6FmWloWe1s5u6Gi6h-2fx6T9QFVuTqI6vPZtRmXHvy0f1XvmErb7JNAPqGrd6RmuGRYbpAFuZMcS-tqHYDy6MBND0KOXgUALrr_BAJWJNSx-E28f5sR3SoBEEs1YJeNpcJ2YBSHX4_LPiJEMh7cUXX6GalngeTujizVHh-7bguPHQDyA3wP6PLDvOf9D0_J4PBhory_BFoWQEODlyJ_9yV8h92UppT2HjFicpM5Ab0WNAUwr5reXovPgVrgN-94YLPzz414r05Jb4OllDnFGSWr8L370VTH4_tn4YeGnzh7VpqxVfiJZghgNCSJSsuv_bUlp2VeqzP_fTnd_vGH8jr5xdz7W-Ll72exRsACt752AtPv2dKXY3nn3j5n1ZR5IxP1x89O1heIJ2XmUQRPz7NTo0BRfNsIlYm-90l0_e6Af3MefJboBlPv-SQ8QsgPriHGA5IhzY2a6Ua84ulH8iJrLYhYpRnkC0LSfqWUWb6XBL8eD1FapI261ZjYfQOZeuRtIR-LmXeq6EKJRkZXdX7ress--YtR3PwKK-QVroULO5d14XvbzjemneQmv_u4MIAAA",
+    "data:image/webp;base64,UklGRsgAAABXRUJQVlA4ILwAAADQBgCdASoiADoAPuVkpk4pJiOiMr27MSAciWcAzjhItUQX9az2m6NaowwUusjVAQA27_ZiRpqaE7ksKKUPjKAAhoN9mYk4Qs3BWanZiY7eCqr-_TASmHrzFZNORYoTt26tzqt5xj5hBZHFFfJHJgUNlUeBZYQ2vDWdHIV0Lda4Pg96HErqdbNWM7D9u1av0OhUbRR1m1a6RzCeLuWZeLzAwvv1j0Iffvqa1i6n5SlYWnCYzNR2eLy-LsIAAA==",
+    "data:image/webp;base64,UklGRiwCAABXRUJQVlA4ICACAABwDACdASoiADoAPuVkpE4pJiOsNVgMAYAciUAYoXZRnPP_MJPoARixQBs67r0KbwmK9aM9Q_txqz2b5vKRjawY7fYy8sVA3n0yV1d3il-_FJ3L5LWwNM21q3cdiv48UjDVnS2_4HRajlzmOgAA_tz48w2xd7twXHq3-X_EekHthxTmdAnNv3Gli3KBmOt0ekgCxiPbHJOSfIzmG7ZKQiiboPkmci609uWDdpiwA6gdxigi_XtoXOLiCJogCUtGynFOvE6UG1DrRbJA-f1S4Wdfzq5S64vK-VU2_EGJ_Ao1jlFXhN6KNE5NcHAgDIvUOfWcfkT4ZyUHrbHZSv9v_vEaBFs-icMBYeW_LFIji0sgNQln3lmC0XV3ddqaYUtvR-EpAA8zllSGbYX_3GE2vVkt6W97L1z65atT8K0ppc8RkREpbJ2RbemDuVJ7Ru9JJVjN57UfXGdfd-FFUjkFo2c65cMp7CAuTVSlsVLR4B_o5cl896Fs6mG1pWWlIoqDvkqqRpsXK7UUED-DxaCIZqtCgAyMUTgBJ1lydM6FLqdNjtT65pFC8WYPpEa45wce8W6TLzuDwWucTpfJ0RyivQXW3S-h-aXWu62N5f9bvCX0YKHaS59j8fZLsUNepU3A16hgTJ78yR9s1Vlsj_baPFn8UnTPxxgoyEg0XC6S6gvTKEb3hXGZpXG4IB9Zf4vKefLvr210Hz0V_DvM_QuqgAAA",
   ];
+  const decodeEmbedUri = (uri) => uri.replaceAll("_", "/").replaceAll("-", "+");
 
   function loadLocalImage(paths, onLoad) {
     const img = new Image();
@@ -869,16 +871,15 @@
     img.src = paths[0];
   }
 
-  // Boss: always use gennady.png when available.
-  loadLocalImage(["/gennady.png", "gennady.png"], (img) => {
+  // Boss: embedded image first (contest-safe, no file dependency).
+  loadLocalImage([decodeEmbedUri(EMBED_BOSS)], (img) => {
     bossImg = makeEnemyPhotoSprite(img, false);
     bossImgHurt = makeEnemyPhotoSprite(img, true);
   });
 
-  // Regular enemies: random image from crooks folder.
-  for (let i = 0; i < CROOK_FILES.length; i++) {
-    const name = CROOK_FILES[i];
-    loadLocalImage([`/crooks/${name}`, `crooks/${name}`], (img) => {
+  // Regular enemies: embedded mini portraits.
+  for (let i = 0; i < EMBED_CROOKS.length; i++) {
+    loadLocalImage([decodeEmbedUri(EMBED_CROOKS[i])], (img) => {
       crookVariants.push({
         normal: makeEnemyPhotoSprite(img, false),
         hurt: makeEnemyPhotoSprite(img, true),
