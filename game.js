@@ -500,7 +500,7 @@
   })();
 
   // ----------------- Maps -----------------
-  const MAP_W = 16, MAP_H = 16;
+  const MAP_W = 31, MAP_H = 31;
 
   function generateMapLines() {
     const w = MAP_W, h = MAP_H;
@@ -511,10 +511,11 @@
     // Fill with wall types
     for (let i = 0; i < cells.length; i++) cells[i] = randWall();
 
-    // Layout: 5x5 logical maze cells, each cell is 2x2 open, walls are 1 thick.
-    // Total: 5*2 + 6*1 = 16 (perfect fit)
-    const CW = 5, CH = 5;
+    // Layout: logical maze cells, each cell is 2x2 open, walls are 1 thick.
+    // Map dimensions follow: size = cells*2 + (cells+1)*1 => 3*cells + 1.
     const step = 3; // 2 open + 1 wall
+    const CW = ((w - 1) / step) | 0;
+    const CH = ((h - 1) / step) | 0;
 
     function cellX(cx) { return 1 + cx * step; }
     function cellY(cy) { return 1 + cy * step; }
@@ -1453,7 +1454,8 @@
       const nearT = 1 - clamp(bd / BOSS_JUMPSCARE_RANGE, 0, 1);
       jumpscareCd = BOSS_JUMPSCARE_CD * (0.72 - 0.30 * nearT) * (1 - 0.35 * rage);
       jumpscareT = BOSS_JUMPSCARE_DUR;
-      const dmg = 8 + 5 * nearT + 4 * rage;
+      const closeT = nearT * nearT;
+      const dmg = 6 + 22 * closeT + 5 * nearT + 4 * rage;
       player.hp -= dmg;
       player.hurt = Math.min(0.55, player.hurt + 0.26 + 0.20 * nearT);
       player.dizzy = Math.min(1, player.dizzy + 0.46);
@@ -1782,6 +1784,14 @@
           shake = Math.max(shake, 0.18);
         } else {
           tryBossTeleportBehindPlayer();
+          const rage = 1 - clamp(boss.hp / (boss.max || 1), 0, 1);
+          if (floorIndex === FLOOR_COUNT - 1 && rage >= 0.38) {
+            const reinfCap = 8 + ((rage * 24) | 0);
+            let burst = 2 + ((rage * 7) | 0);
+            if (rage > 0.7) burst += 2;
+            while (burst-- > 0 && enemies.length < reinfCap) spawnEnemy();
+            setNote("BOSS RAGE - CROOK SWARM!", 1.1);
+          }
         }
       } else if (bestI >= 0) {
         const e = enemies[bestI];
