@@ -1205,7 +1205,13 @@
   // ----------------- Game state -----------------
   let state = "menu";
   const player = { x: 1.5, y: 1.5, a: 0, hp: 100, bob: 0, recoil: 0, hurt: 0, dizzy: 0, blind: 0 };
-  let score = 0, best = 0, wave = 1;
+  let kills = 0, wave = 1;
+  let runClock = 0;
+  let finalStartClock = -1;
+  let finalScore = 0;
+  const LEADER_KEY = "cave_snake_leaderboard_v1";
+  const LEADER_MAX = 5;
+  let leaderboard = [];
   let killsGoal = 10;
   let floorIndex = 0;
   let goalUnlocked = false;
@@ -1251,6 +1257,46 @@
     note = text || "";
     noteT = sec || 0;
   }
+
+  function formatTime(sec) {
+    const t = Math.max(0, isFinite(sec) ? sec : 0);
+    const m = (t / 60) | 0;
+    const s = t - m * 60;
+    return m + ":" + (s < 10 ? "0" : "") + s.toFixed(2);
+  }
+
+  function loadLeaderboard() {
+    leaderboard.length = 0;
+    try {
+      const raw = localStorage.getItem(LEADER_KEY);
+      if (!raw) return;
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return;
+      for (let i = 0; i < arr.length; i++) {
+        const v = +arr[i];
+        if (isFinite(v) && v > 0 && v < 36000) leaderboard.push(v);
+      }
+      leaderboard.sort((a, b) => a - b);
+      if (leaderboard.length > LEADER_MAX) leaderboard.length = LEADER_MAX;
+    } catch (_) { }
+  }
+
+  function saveLeaderboard() {
+    try {
+      localStorage.setItem(LEADER_KEY, JSON.stringify(leaderboard.slice(0, LEADER_MAX)));
+    } catch (_) { }
+  }
+
+  function pushLeaderboard(sec) {
+    const v = +sec;
+    if (!isFinite(v) || v <= 0) return;
+    leaderboard.push(v);
+    leaderboard.sort((a, b) => a - b);
+    if (leaderboard.length > LEADER_MAX) leaderboard.length = LEADER_MAX;
+    saveLeaderboard();
+  }
+
+  loadLeaderboard();
 
   function findExit(px, py) {
     const sx = px | 0, sy = py | 0;
@@ -1550,6 +1596,7 @@
       setNote(`FLOOR ${floorIndex + 1}/${FLOOR_COUNT} - FIND STAIRS`, 2.6);
     } else {
       // Top floor: exit exists, stairs disabled
+      if (finalStartClock < 0) finalStartClock = runClock;
       stairs.x = 0; stairs.y = 0;
       exitGate.x = far.x; exitGate.y = far.y;
       exitGate.open = false;
@@ -1587,8 +1634,11 @@
     state = "play";
     player.hp = 100;
 
-    score = 0;
+    kills = 0;
     wave = 1;
+    runClock = 0;
+    finalStartClock = -1;
+    finalScore = 0;
     floorIndex = 0;
     goalUnlocked = false;
     machineUnlocked = false;
@@ -1818,13 +1868,12 @@
 
         if (e.hp <= 0) {
           enemies.splice(bestI, 1);
-          score++;
+          kills++;
           hitMark = 0.22;
           audio.kill();
           shake = Math.max(shake, 0.12);
 
-          if (score > best) best = score;
-          if (!goalUnlocked && score >= killsGoal) {
+          if (!goalUnlocked && kills >= killsGoal) {
             goalUnlocked = true;
             if (floorIndex === FLOOR_COUNT - 1) {
               if (!boss.alive) {
@@ -1852,12 +1901,12 @@
           let spawnBurst = 2;
           if (floorIndex === FLOOR_COUNT - 1 && boss.alive) {
             spawnBurst += 1 + ((bossRage * 3) | 0); // 2..5 spawns as rage rises
-            if (score > 0 && (score % 4) === 0) spawnBurst += 1 + ((bossRage * 2) | 0);
+            if (kills > 0 && (kills % 4) === 0) spawnBurst += 1 + ((bossRage * 2) | 0);
           }
-          if (score > 0 && (score % 4) === 0) {
+          if (kills > 0 && (kills % 4) === 0) {
             wave++;
             spawnBurst++;
-          } else if ((floorIndex !== FLOOR_COUNT - 1) && score > 0 && (score % 3) === 0) {
+          } else if ((floorIndex !== FLOOR_COUNT - 1) && kills > 0 && (kills % 3) === 0) {
             spawnBurst++;
           }
           while (spawnBurst-- > 0 && enemies.length < spawnCap) spawnEnemy();
@@ -2052,8 +2101,8 @@
         if (dx * dx + dy * dy < 0.52 * 0.52) {
           state = "won";
           audio.stopMusic();
-          const total = score + 10;
-          if (total > best) best = total;
+          finalScore = finalStartClock >= 0 ? Math.max(0, runClock - finalStartClock) : runClock;
+          pushLeaderboard(finalScore);
           setNote("YOU ESCAPED", 2.2);
           shake = Math.max(shake, 0.16);
           audio.pickup();
@@ -2326,6 +2375,21 @@
     }
   }
 
+  function drawLeaderboardPanel(x, y, title) {
+    const w = 112;
+    const h = 72;
+    g.fillStyle = "rgba(0,0,0,0.42)";
+    g.fillRect(x - 4, y - 12, w, h);
+    g.fillStyle = "#eaf4ff";
+    g.font = "10px monospace";
+    g.fillText(title, x, y - 2);
+    g.fillStyle = "#b7d4f2";
+    for (let i = 0; i < LEADER_MAX; i++) {
+      const t = i < leaderboard.length ? formatTime(leaderboard[i]) : "--:--.--";
+      g.fillText(`${i + 1}. ${t}`, x, y + 10 + i * 11);
+    }
+  }
+
   function drawIntroScreen() {
     g.fillStyle = "#070A10";
     g.fillRect(0, 0, RW, RH);
@@ -2339,17 +2403,20 @@
     g.fillText("SURVIVE 3 FLOORS, DEFEAT THE BOSS, ESCAPE.", 36, 66);
 
     g.fillStyle = "#9fc4ea";
-    g.fillText("MOVE: WASD      TURN: Q / E or MOUSE", 36, 92);
-    g.fillText("FIRE: CLICK / SPACE      SWITCH: 1 / 2", 36, 108);
-    g.fillText("FLOOR 2: PICK UP MACHINE GUN", 36, 124);
-    g.fillText("FOLLOW THE TOP ARROW FOR OBJECTIVES", 36, 140);
+    g.fillText("MOVE / TURN: STICK", 16, 92);
+    g.fillText("SHOOT: BTN1      WEAPON: BTN2", 16, 108);
+    g.fillText("FLOOR 2: PICK UP MACHINE GUN", 16, 124);
+    g.fillText("FOLLOW THE TOP ARROW FOR OBJECTIVES", 16, 140);
+    g.fillText("SCORE = FINAL FLOOR CLEAR TIME", 16, 156);
+
+    drawLeaderboardPanel(202, 86, "LEADERBOARD");
 
     g.fillStyle = "#eaf4ff";
-    g.fillText("PRESS ENTER / SPACE / CLICK TO START", 48, 164);
+    g.fillText("PRESS BTN1 TO START", 90, 172);
   }
 
   function renderFrame() {
-    if (state === "intro") {
+    if (state === "intro" || state === "menu") {
       drawIntroScreen();
       return;
     }
@@ -2770,13 +2837,14 @@
     g.drawImage(overlays.scan, 0, 0);
     g.drawImage(overlays.vig, 0, 0);
 
-    // Not locked hint
-    if (!locked && state === "play") {
-      g.fillStyle = "rgba(0,0,0,0.45)";
-      g.fillRect(0, RH - 20, RW, 20);
-      g.fillStyle = "#b7d4f2";
-      g.font = "11px monospace";
-      g.fillText("Click to lock mouse", 6, RH - 7);
+    // Final-floor timer overlay (score timer)
+    if (state === "play" && finalStartClock >= 0) {
+      const t = Math.max(0, runClock - finalStartClock);
+      g.fillStyle = "rgba(0,0,0,0.58)";
+      g.fillRect(RW - 126, 6, 120, 18);
+      g.fillStyle = "#eaf4ff";
+      g.font = "12px monospace";
+      g.fillText("TIMER " + formatTime(t), RW - 122, 19);
     }
   }
 
@@ -2826,7 +2894,7 @@
       g.fillText("GAME OVER", (RW / 2 - 55) | 0, (RH / 2 - 10) | 0);
       g.fillStyle = "#b7d4f2";
       g.font = "12px monospace";
-      g.fillText("Press X, R or Enter to restart", (RW / 2 - 102) | 0, (RH / 2 + 30) | 0);
+      g.fillText("Press BTN1 to restart", (RW / 2 - 68) | 0, (RH / 2 + 30) | 0);
     }
 
     if (state === "won") {
@@ -2837,7 +2905,9 @@
       g.fillText("YOU ESCAPED", (RW / 2 - 58) | 0, (RH / 2 - 10) | 0);
       g.fillStyle = "#b7d4f2";
       g.font = "12px monospace";
-      g.fillText("Press X, R or Enter to play again", (RW / 2 - 114) | 0, (RH / 2 + 30) | 0);
+      g.fillText("SCORE " + formatTime(finalScore), (RW / 2 - 58) | 0, (RH / 2 + 10) | 0);
+      g.fillText("Press BTN1 to play again", (RW / 2 - 72) | 0, (RH / 2 + 30) | 0);
+      drawLeaderboardPanel(194, 92, "LEADERBOARD");
     }
   }
 
@@ -2965,6 +3035,7 @@
     drawBossCastFX();
 
     if (state === "play") {
+      runClock += dt;
       if (shootCd > 0) shootCd -= dt;
       if (flash > 0) flash -= dt;
       if (hitMark > 0) hitMark -= dt;
