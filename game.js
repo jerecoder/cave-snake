@@ -1,2332 +1,2832 @@
-// Cave Snake (Phaser 3) - Infinite-up, trail-permanent, reveal-by-completion
-// Controls (local): WASD / Arrows move, first move starts/restarts, I = New Map, O = Toggle Path
+// game.js — Contest-friendly raycast FPS (visual polish pass)
+// Adds: textured floor/ceiling (perspective), fog shading, vignette+scanlines overlay,
+// wall edge outlines, subtle screen shake. No assets, no libs.
 
-const ARCADE_CONTROLS = {
-  P1U: ["w", "ArrowUp"],
-  P1D: ["s", "ArrowDown"],
-  P1L: ["a", "ArrowLeft"],
-  P1R: ["d", "ArrowRight"],
-  P1B: ["i"], // New map
-  P1C: ["o"], // Toggle path
-};
+(() => {
+  // ----------------- Config -----------------
+  const RW = 320, RH = 180;
+  const FOV = Math.PI / 3;
+  const PROJ = (RW / 2) / Math.tan(FOV / 2);
+  const MAX_RAY_STEPS = 64;
 
-const KEYBOARD_TO_ARCADE = {};
-for (const [code, keys] of Object.entries(ARCADE_CONTROLS)) {
-  keys.forEach((k) => (KEYBOARD_TO_ARCADE[(k || "").toLowerCase()] = code));
-}
+  const TEX = 32, TEXN = TEX * TEX, SH = 32;
+  const PLAYER_R = 0.22; // Keep player from hugging walls too closely.
+  const ENEMY_R = 0.28;
+  const BOSS_R = 0.55;
+  const BOSS_HP = 48;
+  const BOSS_BLIND_R = 11.2;
+  const BOSS_BLIND_GAIN = 0.92;
+  const BOSS_MIND_R = 13.0;
+  const BOSS_MIND_DPS = 4.5;
+  const BOSS_JUMPSCARE_RANGE = 6.4;
+  const BOSS_JUMPSCARE_CD = 4.6;
+  const BOSS_JUMPSCARE_DUR = 0.58;
+  const FIRE_R = 0.13;
+  const FIRE_SPEED = 2.75;
+  const FIRE_DMG = 16;
+  const FIRE_TELEGRAPH = 0.32;
+  const FIRE_TRAIL_LEN = 0.24;
+  const BASE_ENEMIES = 6;
+  const ENEMY_DETECT_R = 7.5;
+  const FLOOR_COUNT = 3;
+  const WEAPONS = [
+    { name: "RIFLE", short: "RFL", cd: 0.18, flash: 0.10, recoilAdd: 0.12, recoilMax: 0.18, spread: 0.004, knock: 0.10, auto: false, snd: "rifle" },
+    { name: "MACHINE", short: "MG", cd: 0.070, flash: 0.055, recoilAdd: 0.055, recoilMax: 0.24, spread: 0.018, knock: 0.07, auto: true, snd: "mg" },
+  ];
 
-// ---------- Tuning knobs ----------
-const SCREEN_W = 800;
-const SCREEN_H = 600;
+  // Fog tint (used during shading bake)
+  const FOG_R = 10, FOG_G = 14, FOG_B = 22;
 
-const GRID_W = 25; // fixed width
-const CHUNK_H = 12; // rows added each time (keep EVEN to ensure clean exits)
-const START_CHUNKS = 1; // initial revealed chunks
-const ADD_CHUNKS = 1; // chunks revealed when you complete the current area
-const MAX_ROW_SHIFT = 3; // smaller lateral moves => more obstacles
-const LONG_SWEEP_CHANCE = 0.14;
-const SPEED_DIAL = 1.0; // code-only speed multiplier (higher = faster)
-const START_LIVES = 3;
+  // ----------------- Canvas (scaled) -----------------
+  const c = document.createElement("canvas");
+  const ctx = c.getContext("2d", { alpha: false });
+  ctx.imageSmoothingEnabled = false;
 
-const TILE = 28;
-const UI_H = 70;
-const PLAY_TOP = UI_H;
-const PLAY_BOTTOM = SCREEN_H - 20;
-const PLAY_H = PLAY_BOTTOM - PLAY_TOP;
-const GRID_X0 = Math.floor((SCREEN_W - GRID_W * TILE) / 2);
+  const buf = document.createElement("canvas");
+  buf.width = RW; buf.height = RH;
+  const g = buf.getContext("2d", { alpha: false });
+  g.imageSmoothingEnabled = false;
 
-const STATE_MENU = 0;
-const STATE_PLAY = 1;
-const STATE_DEAD = 2;
-const STATE_ENTRY = 3;
+  let scale = 1, ox = 0, oy = 0;
 
-// ---------- Theme (arcade / neon) ----------
-const THEME = {
-  // core
-  bg: 0x080b10,
-  playBg: 0x080b10,
-
-  // tiles
-  tileFree: 0x16314d,
-  tileTrail: 0x2bf06f,
-  tileTrailInset: 0x0f2d19,
-  tileBomb: 0x000000,
-
-  // UI
-  hudBg: 0x07121c,
-  hudStroke: 0x62c0ff,
-  panelBg: 0x08121d,
-  panelStroke: 0x62c0ff,
-  dangerStroke: 0xff6b6b,
-
-  // accents
-  accent: 0x62c0ff,
-  success: 0x2bf06f,
-  danger: 0xff6b6b,
-  warn: 0xfde047,
-
-  // text
-  text: "#EDF6FF",
-  muted: "#AFC6DE",
-  dim: "#8CA3B8",
-
-  // FX
-  scanlinesAlpha: 0.10,
-  vignetteAlpha: 0.22,
-};
-
-const FONT_PIXEL = "'Press Start 2P', 'Courier New', monospace";
-
-// ---------- Phaser bootstrap ----------
-const config = {
-  type: Phaser.AUTO,
-  width: SCREEN_W,
-  height: SCREEN_H,
-  backgroundColor: "#080B10",
-  pixelArt: true,
-  antialias: false,
-  roundPixels: true,
-  scene: { create, update },
-};
-new Phaser.Game(config);
-
-// ---------- Game singletons ----------
-let scene, g;
-let state = STATE_MENU;
-let showPath = true;
-
-let world, snake, ui, fx, music, leaderboard;
-let bestChunk = 1;
-let nameEntry = null;
-let highScoreNotice = "";
-
-// For death overlay stats (because code resets map on death)
-let lastRunStats = null;
-
-function create() {
-  scene = this;
-  if (scene.game && scene.game.canvas) {
-    scene.game.canvas.style.imageRendering = "pixelated";
+  function resize() {
+    c.width = innerWidth;
+    c.height = innerHeight;
+    scale = Math.max(1, Math.floor(Math.min(c.width / RW, c.height / RH)));
+    ox = (c.width - RW * scale) >> 1;
+    oy = (c.height - RH * scale) >> 1;
   }
-  g = this.add.graphics();
 
-  fx = new FX(scene);
-  leaderboard = new Leaderboard("cave_snake_leaderboard", 8);
-  music = scene.sound && scene.sound.context ? new MusicEngine(scene.sound.context) : null;
-  ui = new UIRoot(scene);
+  function mountCanvas() {
+    const b = document.body;
+    if (!b) return false;
+    b.style.margin = "0";
+    b.style.overflow = "hidden";
+    b.style.background = "#070A10";
+    if (!c.parentNode) b.appendChild(c);
+    c.style.imageRendering = "pixelated";
+    resize();
+    return true;
+  }
 
-  newMap(); // also builds snake
-  setState(STATE_MENU);
+  addEventListener("resize", resize);
+  if (!mountCanvas()) addEventListener("DOMContentLoaded", mountCanvas, { once: true });
 
-  scene.input.keyboard.on("keydown", (e) => {
-    const key = ((e.key || "") + "").toLowerCase();
-    const code = KEYBOARD_TO_ARCADE[key] || e.key;
-    onPress(code);
+  // ----------------- Input -----------------
+  const keys = Object.create(null);
+  let fireMouse = 0;
+  let fireKey = 0;
+  let triggerHeld = 0;
+  const refreshTrigger = () => { triggerHeld = (fireMouse || fireKey) ? 1 : 0; };
+
+  addEventListener("keydown", (e) => {
+    keys[e.key.toLowerCase()] = 1;
+
+    if ((state === "intro" || state === "menu") && (e.key === " " || e.key === "Enter")) startGame();
+    if (state === "dead" && (e.key === "r" || e.key === "R" || e.key === "x" || e.key === "X" || e.key === "Enter")) reset();
+    if (state === "won" && (e.key === "r" || e.key === "R" || e.key === "x" || e.key === "X" || e.key === "Enter")) reset();
+    if (!e.repeat && state === "play" && e.key === "1") setWeapon(0);
+    if (!e.repeat && state === "play" && e.key === "2") setWeapon(1);
+    if (e.key === "Escape") {
+      if (document.pointerLockElement === c) document.exitPointerLock?.();
+    }
   });
-}
-
-function update(_, dt) {
-  if (state === STATE_PLAY) {
-    if (music) music.setLevel(world.revealed);
-    snake.step(dt);
-
-    if (snake.expandedCount > 0) {
-      for (let i = 0; i < snake.expandedCount; i++) fx.levelUp();
-      ui.onExpand(snake);
-      snake.expandedCount = 0;
+  addEventListener("keyup", e => {
+    keys[e.key.toLowerCase()] = 0;
+    if (e.key === " " || e.key === "Enter") {
+      fireKey = 0;
+      refreshTrigger();
     }
+  });
 
-    if (snake.respawnCount > 0) {
-      for (let i = 0; i < snake.respawnCount; i++) fx.beep(170, 0.09, 0.14, "sawtooth");
-      ui.onRespawn(snake);
-      snake.respawnCount = 0;
+  let locked = false;
+  addEventListener("pointerlockchange", () => {
+    locked = (document.pointerLockElement === c);
+  });
+
+  let mouseDX = 0;
+  addEventListener("mousemove", (e) => {
+    if (!locked) return;
+    mouseDX += e.movementX || 0;
+  });
+
+  c.addEventListener("mousedown", () => {
+    audio.userGesture();
+    if (!locked) c.requestPointerLock?.().catch?.(() => { });
+    if (state === "intro" || state === "menu") startGame();
+    else if (state === "dead" || state === "won") reset();
+    else {
+      fireMouse = 1;
+      refreshTrigger();
+      shoot();
     }
+  });
+  addEventListener("mouseup", () => {
+    fireMouse = 0;
+    refreshTrigger();
+  });
+  addEventListener("blur", () => {
+    fireMouse = 0;
+    fireKey = 0;
+    refreshTrigger();
+  });
 
-    bestChunk = Math.max(bestChunk, world.revealed, snake.chunkLevel());
+  addEventListener("keydown", (e) => {
+    if (e.key === " " || e.key === "Enter") {
+      audio.userGesture();
+      if (state === "play") {
+        fireKey = 1;
+        refreshTrigger();
+        shoot();
+      }
+    }
+  });
 
-    if (snake.dead) {
-      const deathReason = snake.deathReason;
+  // ----------------- Helpers -----------------
+  const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const hypot = Math.hypot;
 
-      lastRunStats = {
-        time: snake.time || 0,
-        score: snake.currentScore(),
-        level: snake.chunkLevel(),
-        bestLevel: bestChunk,
-        maxY: snake.maxY,
-        revealed: world.revealedHeight,
-        fillPct: world.totalFree > 0 ? Math.floor((100 * snake.len) / world.totalFree) : 0,
-        livesLeft: snake.lives,
-        reason: deathReason || "UNKNOWN",
+  const LE = new Uint8Array(new Uint32Array([0x11223344]).buffer)[0] === 0x44;
+  const pack = (r, gg, b) => (LE ? ((255 << 24) | (b << 16) | (gg << 8) | r) : ((r << 24) | (gg << 16) | (b << 8) | 255));
+
+  function hash2(x, y, s) {
+    let n = (x * 374761393 + y * 668265263 + s * 1442695041) | 0;
+    n = (n ^ (n >>> 13)) | 0;
+    n = Math.imul(n, 1274126177) | 0;
+    return (n >>> 0);
+  }
+
+  // ----------------- Audio (procedural) -----------------
+  const audio = (() => {
+    let ctxA = null;
+    let master = null;
+    let threatCd = 0;
+    let stepCd = 0;
+    let hurtUntil = 0;
+    let musicUnlocked = false;
+    let musicTrack = "none";
+    let musicNow = null;
+    const musicNormal = makeMusic([
+      "/music/icpc%20challenge.mp3",
+      "music/icpc%20challenge.mp3",
+      "/music/icpc%20challenge.wav",
+      "music/icpc%20challenge.wav",
+    ], 0.34);
+    const musicFinal = makeMusic([
+      "/music/tourist.mp3",
+      "music/tourist.mp3",
+      "/music/tourist.wav",
+      "music/tourist.wav",
+    ], 0.34);
+
+    function makeMusic(paths, volume) {
+      const el = new Audio();
+      el.loop = true;
+      el.preload = "auto";
+      el.volume = volume;
+      let idx = 0;
+      el.onerror = () => {
+        idx++;
+        if (idx < paths.length) el.src = paths[idx];
       };
-      ui.setLastRun(lastRunStats);
+      el.src = paths[0];
+      return el;
+    }
 
-      fx.explode();
-      newMap();
-      if (leaderboard && leaderboard.qualifies(lastRunStats.score)) {
-        startNameEntry(lastRunStats.score, lastRunStats.level, deathReason);
-        setState(STATE_ENTRY, deathReason);
-      } else {
-        setState(STATE_DEAD, deathReason);
+    function ensure() {
+      if (ctxA) return;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      ctxA = new AC();
+      master = ctxA.createGain();
+      master.gain.value = 0.34;
+      master.connect(ctxA.destination);
+    }
+
+    function resume() {
+      ensure();
+      if (ctxA && ctxA.state === "suspended") ctxA.resume().catch(() => { });
+    }
+
+    function musicSrc() {
+      if (musicTrack === "normal") return musicNormal;
+      if (musicTrack === "final") return musicFinal;
+      return null;
+    }
+
+    function playMusic(el) {
+      const p = el.play();
+      if (p && p.catch) p.catch(() => { });
+    }
+
+    function syncMusic() {
+      const next = musicSrc();
+      if (musicNow !== next) {
+        if (musicNow) {
+          musicNow.pause();
+          musicNow.currentTime = 0;
+        }
+        musicNow = next;
+      }
+      if (!musicNow || !musicUnlocked) return;
+      playMusic(musicNow);
+    }
+
+    function tone(freq, dur, vol, type, delay) {
+      if (!ctxA || !master) return;
+      const t = ctxA.currentTime + (delay || 0);
+      const o = ctxA.createOscillator();
+      const gg = ctxA.createGain();
+      o.type = type || "square";
+      o.frequency.setValueAtTime(freq, t);
+      gg.gain.setValueAtTime(Math.max(0.0001, vol || 0.08), t);
+      gg.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+      o.connect(gg);
+      gg.connect(master);
+      o.start(t);
+      o.stop(t + dur);
+    }
+
+    function threat(level, dt) {
+      if (!ctxA || !master || level <= 0) {
+        threatCd = 0;
+        return;
+      }
+      threatCd -= dt;
+      if (threatCd > 0) return;
+
+      const t = clamp(level, 0, 1);
+      threatCd = 0.78 - t * 0.60; // faster and more oppressive as enemies get closer
+      const base = 58 + t * 88;
+      const jitter = 0.96 + Math.random() * 0.10;
+
+      // Low dissonant stack + sub rumble for a scarier approach cue.
+      tone(base * jitter, 0.22, 0.11 + t * 0.11, "sawtooth");
+      tone(base * 0.52 * (1.0 + Math.random() * 0.04), 0.28, 0.10 + t * 0.10, "triangle", 0.01);
+      tone(base * 1.41 * (0.98 + Math.random() * 0.06), 0.16, 0.08 + t * 0.08, "sawtooth", 0.02);
+      tone(base * 2.93, 0.07, 0.05 + t * 0.06, "square", 0.04);
+    }
+
+    function footstep(level, dt) {
+      if (!ctxA || !master || level <= 0) {
+        stepCd = 0;
+        return;
+      }
+      stepCd -= dt;
+      if (stepCd > 0) return;
+
+      const t = clamp(level, 0, 1);
+      stepCd = 0.36 - t * 0.18;
+      const f = 82 + Math.random() * 26;
+      tone(f, 0.06, 0.07 + t * 0.08, "triangle");
+      tone(f * 1.8, 0.025, 0.03 + t * 0.035, "square", 0.01);
+    }
+
+    return {
+      userGesture() {
+        resume();
+        musicUnlocked = true;
+        syncMusic();
+      },
+      musicForFloor(idx) {
+        musicTrack = idx >= FLOOR_COUNT - 1 ? "final" : "normal";
+        syncMusic();
+      },
+      stopMusic() {
+        musicTrack = "none";
+        syncMusic();
+      },
+      shoot(kind) {
+        if (kind === "mg") {
+          tone(860 + Math.random() * 100, 0.020, 0.14, "square");
+          tone(210 + Math.random() * 35, 0.050, 0.09, "sawtooth");
+          tone(80 + Math.random() * 12, 0.060, 0.06, "triangle", 0.006);
+          return;
+        }
+        tone(1120, 0.035, 0.18, "square");
+        tone(230, 0.09, 0.12, "sawtooth");
+        tone(95, 0.11, 0.08, "triangle", 0.01);
+      },
+      hit() { tone(560, 0.05, 0.11, "triangle"); },
+      kill() { tone(640, 0.07, 0.13, "triangle"); tone(980, 0.08, 0.10, "triangle"); },
+      hurt() {
+        if (!ctxA) return;
+        if (ctxA.currentTime < hurtUntil) return;
+        hurtUntil = ctxA.currentTime + 0.09;
+        tone(140, 0.09, 0.16, "sawtooth");
+      },
+      fireball(enraged) {
+        const t = enraged ? 1 : 0;
+        tone(180 + Math.random() * 24, 0.10, 0.11 + t * 0.05, "sawtooth");
+        tone(420 + Math.random() * 50, 0.07, 0.08 + t * 0.04, "triangle", 0.015);
+        tone(760 + Math.random() * 70, 0.05, 0.05 + t * 0.03, "square", 0.03);
+      },
+      jumpscare() {
+        tone(62, 0.22, 0.18, "sawtooth");
+        tone(118, 0.24, 0.14, "triangle", 0.01);
+        tone(940, 0.06, 0.14, "square", 0.02);
+      },
+      pickup() { tone(900, 0.08, 0.10, "square"); tone(1220, 0.10, 0.08, "square"); },
+      click() { tone(650, 0.06, 0.08, "square"); },
+      footstep,
+      threat,
+    };
+  })();
+
+  // ----------------- Maps -----------------
+  const MAP_W = 16, MAP_H = 16;
+
+  function generateMapLines() {
+    const w = MAP_W, h = MAP_H;
+    const cells = new Uint8Array(w * h);
+    const id = (x, y) => y * w + x;
+    const randWall = () => 1 + ((Math.random() * 3) | 0);
+
+    // Fill with wall types
+    for (let i = 0; i < cells.length; i++) cells[i] = randWall();
+
+    // Layout: 5x5 logical maze cells, each cell is 2x2 open, walls are 1 thick.
+    // Total: 5*2 + 6*1 = 16 (perfect fit)
+    const CW = 5, CH = 5;
+    const step = 3; // 2 open + 1 wall
+
+    function cellX(cx) { return 1 + cx * step; }
+    function cellY(cy) { return 1 + cy * step; }
+
+    function carve2x2(cx, cy) {
+      const x0 = cellX(cx), y0 = cellY(cy);
+      cells[id(x0, y0)] = 0; cells[id(x0 + 1, y0)] = 0;
+      cells[id(x0, y0 + 1)] = 0; cells[id(x0 + 1, y0 + 1)] = 0;
+    }
+
+    function connect(cx, cy, nx, ny) {
+      const x0 = cellX(cx), y0 = cellY(cy);
+      if (nx === cx + 1) { // right
+        const wx = x0 + 2;
+        cells[id(wx, y0)] = 0; cells[id(wx, y0 + 1)] = 0;
+      } else if (nx === cx - 1) { // left
+        const wx = x0 - 1;
+        cells[id(wx, y0)] = 0; cells[id(wx, y0 + 1)] = 0;
+      } else if (ny === cy + 1) { // down
+        const wy = y0 + 2;
+        cells[id(x0, wy)] = 0; cells[id(x0 + 1, wy)] = 0;
+      } else if (ny === cy - 1) { // up
+        const wy = y0 - 1;
+        cells[id(x0, wy)] = 0; cells[id(x0 + 1, wy)] = 0;
+      }
+    }
+
+    // Carve all cells
+    for (let cy = 0; cy < CH; cy++) for (let cx = 0; cx < CW; cx++) carve2x2(cx, cy);
+
+    // Perfect maze via DFS on logical cells
+    const vis = new Uint8Array(CW * CH);
+    const st = new Int16Array(CW * CH);
+    let sp = 0;
+
+    function push(v) { st[sp++] = v; }
+    function pop() { return st[--sp]; }
+    function top() { return st[sp - 1]; }
+
+    vis[0] = 1; // start at (0,0) near spawn
+    push(0);
+
+    const nx = new Int8Array(4);
+    const ny = new Int8Array(4);
+
+    while (sp) {
+      const cur = top();
+      const cx = cur % CW;
+      const cy = (cur / CW) | 0;
+
+      let n = 0;
+      if (cx > 0 && !vis[cur - 1]) { nx[n] = cx - 1; ny[n] = cy; n++; }
+      if (cx + 1 < CW && !vis[cur + 1]) { nx[n] = cx + 1; ny[n] = cy; n++; }
+      if (cy > 0 && !vis[cur - CW]) { nx[n] = cx; ny[n] = cy - 1; n++; }
+      if (cy + 1 < CH && !vis[cur + CW]) { nx[n] = cx; ny[n] = cy + 1; n++; }
+
+      if (!n) { pop(); continue; }
+
+      const k = (Math.random() * n) | 0;
+      const tcx = nx[k], tcy = ny[k];
+      const nxt = tcy * CW + tcx;
+
+      connect(cx, cy, tcx, tcy);
+      vis[nxt] = 1;
+      push(nxt);
+    }
+
+    // Add a few loops (fewer loops on higher floors => more maze-like and harder)
+    let loops = 6 - floorIndex * 2; // 6,4,2
+    if (loops < 2) loops = 2;
+
+    for (let i = 0; i < loops; i++) {
+      const cx = (Math.random() * CW) | 0;
+      const cy = (Math.random() * CH) | 0;
+      const dir = (Math.random() * 4) | 0;
+
+      let tcx = cx, tcy = cy;
+      if (dir === 0 && cx + 1 < CW) tcx = cx + 1;
+      else if (dir === 1 && cx > 0) tcx = cx - 1;
+      else if (dir === 2 && cy + 1 < CH) tcy = cy + 1;
+      else if (dir === 3 && cy > 0) tcy = cy - 1;
+      else continue;
+
+      connect(cx, cy, tcx, tcy);
+    }
+
+    // Solid border walls
+    for (let x = 0; x < w; x++) { cells[id(x, 0)] = randWall(); cells[id(x, h - 1)] = randWall(); }
+    for (let y = 0; y < h; y++) { cells[id(0, y)] = randWall(); cells[id(w - 1, y)] = randWall(); }
+
+    // Spawn pocket always clear
+    for (let y = 1; y <= 3; y++) for (let x = 1; x <= 3; x++) cells[id(x, y)] = 0;
+
+    // Convert to string lines
+    const lines = new Array(h);
+    for (let y = 0; y < h; y++) {
+      let row = "";
+      for (let x = 0; x < w; x++) row += String(cells[id(x, y)]);
+      lines[y] = row;
+    }
+    return lines;
+  }
+
+
+  let MW = 0, MH = 0, grid = null;
+  let floorWallType = 1;
+
+  function loadMap(lines) {
+    MH = lines.length;
+    MW = lines[0].length;
+    grid = new Uint8Array(MW * MH);
+    for (let y = 0; y < MH; y++) {
+      const row = lines[y];
+      for (let x = 0; x < MW; x++) {
+        const v = row.charCodeAt(x) - 48;
+        grid[y * MW + x] = v <= 0 ? 0 : floorWallType;
+      }
+    }
+    widenCorridors();
+  }
+
+  // Much more conservative smoother (preserve maze separators).
+  function widenCorridors() {
+    // With the 2-wide maze generator, we don't need smoothing.
+    // Leaving this empty preserves clean, readable corridors.
+  }
+
+
+  function cellAt(x, y) {
+    const ix = x | 0, iy = y | 0;
+    if (ix < 0 || iy < 0 || ix >= MW || iy >= MH) return 1;
+    return grid[iy * MW + ix];
+  }
+  function isWall(x, y) { return cellAt(x, y) !== 0; }
+
+  function canStand(px, py, r = PLAYER_R) {
+    const d = r * 0.70710678;
+    return (
+      !isWall(px + r, py) &&
+      !isWall(px - r, py) &&
+      !isWall(px, py + r) &&
+      !isWall(px, py - r) &&
+      !isWall(px + d, py + d) &&
+      !isWall(px - d, py + d) &&
+      !isWall(px + d, py - d) &&
+      !isWall(px - d, py - d)
+    );
+  }
+  function findSpawn() {
+    if (canStand(1.5, 1.5, PLAYER_R)) return { x: 1.5, y: 1.5 };
+    for (let y = 1; y < MH - 1; y++) {
+      for (let x = 1; x < MW - 1; x++) {
+        const px = x + 0.5, py = y + 0.5;
+        if (cellAt(px, py) === 0 && canStand(px, py, PLAYER_R)) return { x: px, y: py };
+      }
+    }
+    return { x: 1.5, y: 1.5 };
+  }
+
+  function moveCircle(body, moveX, moveY, r) {
+    const dist = hypot(moveX, moveY);
+    if (dist <= 0.000001) return false;
+
+    const steps = Math.max(1, Math.ceil(dist / 0.07));
+    const sx = moveX / steps;
+    const sy = moveY / steps;
+    let moved = false;
+
+    for (let i = 0; i < steps; i++) {
+      const nx = body.x + sx;
+      const ny = body.y + sy;
+
+      if (canStand(nx, ny, r)) {
+        body.x = nx;
+        body.y = ny;
+        moved = true;
+        continue;
+      }
+
+      let slid = false;
+      if (canStand(body.x + sx, body.y, r)) {
+        body.x += sx;
+        slid = true;
+      }
+      if (canStand(body.x, body.y + sy, r)) {
+        body.y += sy;
+        slid = true;
+      }
+      if (slid) moved = true;
+      else break;
+    }
+    return moved;
+  }
+
+  function nudgeOut(body, r) {
+    if (canStand(body.x, body.y, r)) return;
+
+    for (let step = 1; step <= 6; step++) {
+      const d = step * 0.03;
+      for (let i = 0; i < 8; i++) {
+        const a = i * (Math.PI * 0.25);
+        const nx = body.x + Math.cos(a) * d;
+        const ny = body.y + Math.sin(a) * d;
+        if (canStand(nx, ny, r)) {
+          body.x = nx;
+          body.y = ny;
+          return;
+        }
       }
     }
   }
 
-  world.draw(g, snake, showPath);
-  ui.update(state, snake, world, bestChunk, showPath, dt);
-}
-
-// ---------- Input ----------
-function onPress(code) {
-  if (state === STATE_ENTRY) {
-    onNameEntryPress(code);
-    return;
+  function cellOpen(ix, iy) {
+    if (ix < 0 || iy < 0 || ix >= MW || iy >= MH) return false;
+    return grid[iy * MW + ix] === 0;
   }
 
-  if (state === STATE_DEAD) {
-    fx.beep(650, 0.08, 0.10, "square");
-    setState(STATE_MENU);
-    return;
-  }
+  function aStarNextStep(sx, sy, gx, gy) {
+    if (!cellOpen(sx, sy) || !cellOpen(gx, gy)) return null;
+    if (sx === gx && sy === gy) return { x: sx + 0.5, y: sy + 0.5 };
 
-  if (code === "P1U") onMoveInput(0, +1);
-  else if (code === "P1D") onMoveInput(0, -1);
-  else if (code === "P1L") onMoveInput(-1, 0);
-  else if (code === "P1R") onMoveInput(+1, 0);
-  else if (code === "P1C") {
-    showPath = !showPath;
-    fx.beep(showPath ? 900 : 500, 0.06, 0.08, "square");
-    ui.toast(showPath ? "PATH ON" : "PATH OFF", "info");
-  } else if (code === "P1B") {
-    fx.beep(300, 0.08, 0.10, "square");
-    newMap();
-    setState(STATE_MENU);
-  }
-}
+    const n = MW * MH;
+    const start = sy * MW + sx;
+    const goal = gy * MW + gx;
 
-function onMoveInput(dx, dy) {
-  if (state !== STATE_PLAY) {
-    fx.beep(650, 0.08, 0.10, "square");
-    startRun();
-  }
-  snake.setWantedDir(dx, dy);
-}
+    const open = [];
+    const inOpen = new Uint8Array(n);
+    const closed = new Uint8Array(n);
+    const came = new Int16Array(n);
+    const gScore = new Int16Array(n);
 
-function setState(next, msg) {
-  state = next;
-  if (music) {
-    music.setLevel(state === STATE_PLAY && world ? world.revealed : 1);
-    music.setActive(state === STATE_PLAY);
-  }
-  ui.setMode(state, msg || "", buildUiContext());
-}
-
-function buildUiContext() {
-  return {
-    bestChunk,
-    lastRunStats,
-    leaderboard: leaderboard ? leaderboard.getEntries() : [],
-    nameEntry,
-    highScoreNotice,
-  };
-}
-
-function startNameEntry(score, level, reason) {
-  nameEntry = {
-    score: Math.max(0, score | 0),
-    level: Math.max(1, level | 0),
-    chars: ["A", "A", "A"],
-    cursor: 0,
-    reason: reason || "",
-  };
-}
-
-function onNameEntryPress(code) {
-  if (!nameEntry) return;
-
-  const charset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-  const isLetterOrDigit = typeof code === "string" && code.length === 1 && /[a-z0-9]/i.test(code);
-
-  if (code === "P1L") {
-    nameEntry.cursor = (nameEntry.cursor + 2) % 3;
-    fx.beep(440, 0.05, 0.06, "square");
-  } else if (code === "P1R") {
-    nameEntry.cursor = (nameEntry.cursor + 1) % 3;
-    fx.beep(520, 0.05, 0.06, "square");
-  } else if (code === "P1U" || code === "P1D") {
-    const curr = nameEntry.chars[nameEntry.cursor];
-    const idx = Math.max(0, charset.indexOf(curr));
-    const next = (idx + (code === "P1U" ? 1 : -1) + charset.length) % charset.length;
-    nameEntry.chars[nameEntry.cursor] = charset[next];
-    fx.beep(700, 0.045, 0.06, "triangle");
-  } else if (isLetterOrDigit) {
-    nameEntry.chars[nameEntry.cursor] = code.toUpperCase();
-    nameEntry.cursor = Math.min(2, nameEntry.cursor + 1);
-    fx.beep(760, 0.04, 0.06, "triangle");
-  } else if (code === "P1B" || code === "Enter" || code === " ") {
-    const initials = nameEntry.chars.join("");
-    const result = leaderboard.add(initials, nameEntry.score, nameEntry.level);
-    if (result && result.rank === 1) {
-      highScoreNotice = `CONGRATS ${initials}! NEW #1 WITH ${nameEntry.score}`;
-      fx.levelUp();
-    } else if (result && result.rank) {
-      highScoreNotice = `GREAT RUN ${initials}! YOU PLACED #${result.rank}`;
-    } else {
-      highScoreNotice = `SCORE SAVED FOR ${initials}`;
-    }
-    nameEntry = null;
-    fx.beep(980, 0.08, 0.10, "square");
-    setState(STATE_MENU);
-    return;
-  } else if (code === "Escape" || code === "P1C") {
-    nameEntry = null;
-    highScoreNotice = "";
-    fx.beep(300, 0.06, 0.08, "square");
-    setState(STATE_MENU);
-    return;
-  } else {
-    return;
-  }
-
-  ui.setMode(state, "", buildUiContext());
-}
-
-function startRun() {
-  highScoreNotice = "";
-  snake.reset(); // same world (map persists)
-  setState(STATE_PLAY);
-}
-
-function newMap() {
-  const seed = (Math.random() * 0xffffffff) >>> 0;
-  world = new World(seed);
-  snake = new Snake(world);
-}
-
-// ---------- Core model ----------
-class World {
-  constructor(seed) {
-    this.seed = seed >>> 0;
-
-    this.chunks = [];
-    this.chunkStarts = [];
-    this.revealed = 0;
-
-    this.totalFree = 0; // how many free tiles exist in revealed area
-    this.totalPathLen = 0; // canonical path length (matches totalFree with this generator)
-    this.expandFlash = 0;
-
-    // camera info for UI layers (callouts/particles anchored to grid)
-    this.lastCamBottom = 0;
-    this.lastVisRows = 0;
-
-    this.revealMore(START_CHUNKS);
-  }
-
-  get revealedHeight() {
-    return this.revealed * CHUNK_H;
-  }
-
-  isFree(x, y) {
-    if (x < 0 || x >= GRID_W || y < 0 || y >= this.revealedHeight) return false;
-    const c = (y / CHUNK_H) | 0;
-    const k = y * GRID_W + x;
-    return this.chunks[c].free.has(k);
-  }
-
-  maybeExpand(snake) {
-    if (snake.len >= this.totalFree) {
-      this.revealMore(ADD_CHUNKS);
-      return true;
-    }
-    return false;
-  }
-
-  revealMore(n) {
     for (let i = 0; i < n; i++) {
-      const idx = this.revealed + i;
-      const chunksLoaded = idx + 1;
-      const chunk = generateChunk(this.seed, idx, chunksLoaded);
-
-      this.chunks[idx] = chunk;
-      this.chunkStarts[idx] = this.totalPathLen;
-
-      this.totalPathLen += chunk.path.length;
-      this.totalFree += chunk.freeCount;
+      came[i] = -1;
+      gScore[i] = 32767;
     }
-    this.revealed += n;
-    this.expandFlash = 1;
+
+    gScore[start] = 0;
+    inOpen[start] = 1;
+    open.push(start);
+
+    while (open.length) {
+      let best = 0;
+      let bestId = open[0];
+      let bestF = gScore[bestId] + Math.abs((bestId % MW) - gx) + Math.abs(((bestId / MW) | 0) - gy);
+      for (let i = 1; i < open.length; i++) {
+        const id = open[i];
+        const f = gScore[id] + Math.abs((id % MW) - gx) + Math.abs(((id / MW) | 0) - gy);
+        if (f < bestF) {
+          bestF = f;
+          best = i;
+          bestId = id;
+        }
+      }
+
+      const cur = bestId;
+      open.splice(best, 1);
+      inOpen[cur] = 0;
+      if (cur === goal) break;
+      closed[cur] = 1;
+
+      const cx = cur % MW, cy = (cur / MW) | 0;
+      const n0 = cur - 1;
+      const n1 = cur + 1;
+      const n2 = cur - MW;
+      const n3 = cur + MW;
+
+      if (cx > 0 && !closed[n0] && grid[n0] === 0) {
+        const ng = gScore[cur] + 1;
+        if (ng < gScore[n0]) {
+          gScore[n0] = ng; came[n0] = cur;
+          if (!inOpen[n0]) { inOpen[n0] = 1; open.push(n0); }
+        }
+      }
+      if (cx + 1 < MW && !closed[n1] && grid[n1] === 0) {
+        const ng = gScore[cur] + 1;
+        if (ng < gScore[n1]) {
+          gScore[n1] = ng; came[n1] = cur;
+          if (!inOpen[n1]) { inOpen[n1] = 1; open.push(n1); }
+        }
+      }
+      if (cy > 0 && !closed[n2] && grid[n2] === 0) {
+        const ng = gScore[cur] + 1;
+        if (ng < gScore[n2]) {
+          gScore[n2] = ng; came[n2] = cur;
+          if (!inOpen[n2]) { inOpen[n2] = 1; open.push(n2); }
+        }
+      }
+      if (cy + 1 < MH && !closed[n3] && grid[n3] === 0) {
+        const ng = gScore[cur] + 1;
+        if (ng < gScore[n3]) {
+          gScore[n3] = ng; came[n3] = cur;
+          if (!inOpen[n3]) { inOpen[n3] = 1; open.push(n3); }
+        }
+      }
+    }
+
+    if (came[goal] === -1) return null;
+    let step = goal;
+    while (came[step] !== start && came[step] !== -1) step = came[step];
+    if (came[step] === -1) return null;
+
+    return { x: (step % MW) + 0.5, y: ((step / MW) | 0) + 0.5 };
   }
 
-  pathKeyAt(globalIndex) {
-    for (let c = 0; c < this.revealed; c++) {
-      const start = this.chunkStarts[c];
-      const p = this.chunks[c].path;
-      const j = globalIndex - start;
-      if (j >= 0 && j < p.length) return p[j];
+  // ----------------- Textures (procedural + shaded w/ fog tint) -----------------
+  const wallTex = new Array(4); // wallTex[type] = Uint32Array(SH*TEXN)
+  let floorTex = null;          // Uint32Array(SH*TEXN)
+  let ceilTex = null;           // Uint32Array(SH*TEXN)
+
+  function bakeShades(base, out, minF, fogMix) {
+    for (let s = 0; s < SH; s++) {
+      const f = minF + (1 - minF) * (s / (SH - 1)); // 0..1 brightness
+      const inv = 1 - f;
+      const off = s * TEXN;
+      for (let i = 0; i < TEXN; i++) {
+        const c = base[i];
+        const rr = c & 255;
+        const gg = (c >>> 8) & 255;
+        const bb = (c >>> 16) & 255;
+
+        const r2 = (rr * f + FOG_R * inv * fogMix) | 0;
+        const g2 = (gg * f + FOG_G * inv * fogMix) | 0;
+        const b2 = (bb * f + FOG_B * inv * fogMix) | 0;
+
+        out[off + i] = pack(r2, g2, b2);
+      }
+    }
+  }
+
+  function genTextures() {
+    for (let t = 1; t <= 3; t++) {
+      const base = new Uint32Array(TEXN);
+
+      for (let y = 0; y < TEX; y++) {
+        for (let x = 0; x < TEX; x++) {
+          let r = 0, gg = 0, b = 0;
+
+          if (t === 1) {
+            // BRICKS: consistent mortar + offset rows
+            const row = y >> 2;                 // brick rows (height 4)
+            const off = (row & 1) ? 4 : 0;      // offset every other row
+            const mortar = ((y & 3) === 0) || (((x + off) & 7) === 0);
+
+            if (mortar) { r = 22; gg = 26; b = 34; }
+            else {
+              r = 110; gg = 92; b = 138;
+              // small bevel for depth
+              if (((y & 3) === 1) || (((x + off) & 7) === 1)) { r += 8; gg += 6; b += 8; }
+              if (((y & 3) === 3) || (((x + off) & 7) === 7)) { r -= 6; gg -= 5; b -= 6; }
+            }
+          } else if (t === 2) {
+            // PANELS: large 16x16 plates + bolts
+            const px = x & 15, py = y & 15;
+            const seam = (px === 0) || (py === 0);
+            const bolt = ((px === 2 || px === 13) && (py === 2 || py === 13));
+            const stripe = (px === 7 || px === 8) && (py > 2 && py < 14);
+
+            r = 44; gg = 78; b = 126;
+            if (seam) { r = 70; gg = 112; b = 170; }
+            if (stripe) { r += 8; gg += 14; b += 18; }
+            if (bolt) { r = 210; gg = 210; b = 210; }
+          } else {
+            // STONE: 8x8 blocks + simple cracks
+            const bx = x & 7, by = y & 7;
+            const seam = (bx === 0) || (by === 0);
+            const crack = ((x + y) % 11) === 0;
+
+            r = 26; gg = 102; b = 32;
+            if (seam) { r -= 10; gg -= 16; b -= 10; }
+            if (crack && !seam) { r -= 6; gg -= 10; b -= 6; }
+          }
+
+          base[y * TEX + x] = pack(clamp(r, 0, 255), clamp(gg, 0, 255), clamp(b, 0, 255));
+        }
+      }
+
+      const shaded = new Uint32Array(SH * TEXN);
+      bakeShades(base, shaded, 0.20, 0.92);
+      wallTex[t] = shaded;
+    }
+
+    // Floor (clean large tiles, less noise)
+    const floorBase = new Uint32Array(TEXN);
+    for (let y = 0; y < TEX; y++) {
+      for (let x = 0; x < TEX; x++) {
+        const tile = (((x >> 4) ^ (y >> 4)) & 1);
+        const seam = ((x & 15) === 0) || ((y & 15) === 0);
+        const seamHeavy = ((x & 31) === 0) || ((y & 31) === 0);
+        const dirMark = ((x & 31) === 6);
+        let r = tile ? 28 : 24;
+        let gg = tile ? 34 : 30;
+        let b = tile ? 52 : 46;
+
+        if (seam) { r = (r * 0.64) | 0; gg = (gg * 0.64) | 0; b = (b * 0.70) | 0; }
+        if (seamHeavy) { r += 6; gg += 8; b += 12; }
+        if (dirMark) { gg += 8; b += 12; }
+
+        floorBase[y * TEX + x] = pack(clamp(r, 0, 255), clamp(gg, 0, 255), clamp(b, 0, 255));
+      }
+    }
+    floorTex = new Uint32Array(SH * TEXN);
+    bakeShades(floorBase, floorTex, 0.12, 1.05);
+
+    // Ceiling (clean panel grid)
+    const ceilBase = new Uint32Array(TEXN);
+    for (let y = 0; y < TEX; y++) {
+      for (let x = 0; x < TEX; x++) {
+        const panel = ((x & 15) === 0) || ((y & 15) === 0);
+        const beam = ((x & 31) === 8) || ((y & 31) === 8);
+        const vent = ((x & 7) === 0) && ((y & 7) === 0);
+        let r = 16, gg = 20, b = 30;
+
+        if (panel) { r += 18; gg += 18; b += 26; }
+        if (beam) { r += 6; gg += 8; b += 10; }
+        if (vent) { r -= 8; gg -= 8; b -= 10; }
+
+        ceilBase[y * TEX + x] = pack(clamp(r, 0, 255), clamp(gg, 0, 255), clamp(b, 0, 255));
+      }
+    }
+    ceilTex = new Uint32Array(SH * TEXN);
+    bakeShades(ceilBase, ceilTex, 0.10, 1.10);
+  }
+  genTextures();
+
+  // ----------------- Enemy sprite -----------------
+  function makeEnemySprite(hurt) {
+    const s = document.createElement("canvas");
+    s.width = 48; s.height = 80;
+    const cg = s.getContext("2d");
+    cg.imageSmoothingEnabled = false;
+    cg.clearRect(0, 0, s.width, s.height);
+
+    const body = hurt ? "#f2f2f2" : "#b44545";
+    const shadow = hurt ? "#d8d8d8" : "#6f2727";
+
+    // Rectangular body.
+    cg.fillStyle = shadow;
+    cg.fillRect(4, 4, 40, 72);
+    cg.fillStyle = body;
+    cg.fillRect(6, 6, 36, 68);
+
+    // outline
+    cg.fillStyle = "rgba(0,0,0,0.35)";
+    cg.fillRect(4, 4, 40, 1);
+    cg.fillRect(4, 75, 40, 1);
+    cg.fillRect(4, 4, 1, 72);
+    cg.fillRect(43, 4, 1, 72);
+
+    return s;
+  }
+
+  function makeEnemyPhotoSprite(photo, hurt) {
+    const s = document.createElement("canvas");
+    s.width = 48; s.height = 80;
+    const cg = s.getContext("2d");
+    cg.imageSmoothingEnabled = true;
+    cg.clearRect(0, 0, s.width, s.height);
+
+    // Rectangle frame + photo fill (cover fit so faces are not squashed).
+    cg.fillStyle = "rgba(0,0,0,0.55)";
+    cg.fillRect(2, 2, 44, 76);
+
+    const sw = photo.naturalWidth || photo.width || 1;
+    const sh = photo.naturalHeight || photo.height || 1;
+    const dstW = 40, dstH = 72;
+    const srcAspect = sw / sh;
+    const dstAspect = dstW / dstH;
+    let sx = 0, sy = 0, cw = sw, ch = sh;
+    if (srcAspect > dstAspect) {
+      cw = sh * dstAspect;
+      sx = (sw - cw) * 0.5;
+    } else {
+      ch = sw / dstAspect;
+      sy = (sh - ch) * 0.5;
+    }
+    cg.drawImage(photo, sx, sy, cw, ch, 4, 4, dstW, dstH);
+
+    // Hurt flash while preserving face.
+    if (hurt) {
+      cg.fillStyle = "rgba(255,255,255,0.18)";
+      cg.fillRect(4, 4, 40, 72);
+    }
+
+    // Outline for readability.
+    cg.fillStyle = "rgba(0,0,0,0.35)";
+    cg.fillRect(2, 2, 44, 1);
+    cg.fillRect(2, 77, 44, 1);
+    cg.fillRect(2, 2, 1, 76);
+    cg.fillRect(45, 2, 1, 76);
+
+    return s;
+  }
+
+  let enemyImg = makeEnemySprite(false);
+  let enemyImgHurt = makeEnemySprite(true);
+  let enemyImgReady = true;
+  let bossImg = enemyImg;
+  let bossImgHurt = enemyImgHurt;
+  const crookVariants = [];
+  const CROOK_FILES = [
+    "74da8508af38dfcc.jpg",
+    "7cf0a442d4071e87.jpg",
+    "b450806e36caa423.jpg",
+    "d429161cb219e72d.jpg",
+    "ec7b2b5bd30c511a.jpg",
+    "umnik.jpg",
+  ];
+
+  function loadLocalImage(paths, onLoad) {
+    const img = new Image();
+    let idx = 0;
+    img.onload = () => onLoad(img);
+    img.onerror = () => {
+      idx++;
+      if (idx < paths.length) img.src = paths[idx];
+    };
+    img.src = paths[0];
+  }
+
+  // Boss: always use gennady.png when available.
+  loadLocalImage(["/gennady.png", "gennady.png"], (img) => {
+    bossImg = makeEnemyPhotoSprite(img, false);
+    bossImgHurt = makeEnemyPhotoSprite(img, true);
+  });
+
+  // Regular enemies: random image from crooks folder.
+  for (let i = 0; i < CROOK_FILES.length; i++) {
+    const name = CROOK_FILES[i];
+    loadLocalImage([`/crooks/${name}`, `crooks/${name}`], (img) => {
+      crookVariants.push({
+        normal: makeEnemyPhotoSprite(img, false),
+        hurt: makeEnemyPhotoSprite(img, true),
+      });
+      // Use the first loaded crook as global fallback.
+      if (crookVariants.length === 1) {
+        enemyImg = crookVariants[0].normal;
+        enemyImgHurt = crookVariants[0].hurt;
+      }
+    });
+  }
+
+  // ----------------- Overlays (scanlines + vignette) -----------------
+  const overlays = (() => {
+    const scan = document.createElement("canvas");
+    scan.width = RW; scan.height = RH;
+    const sg = scan.getContext("2d");
+    sg.clearRect(0, 0, RW, RH);
+    sg.fillStyle = "rgba(255,255,255,0.04)";
+    for (let y = 0; y < RH; y += 3) sg.fillRect(0, y, RW, 1);
+
+    const vig = document.createElement("canvas");
+    vig.width = RW; vig.height = RH;
+    const vg = vig.getContext("2d");
+    const id = vg.createImageData(RW, RH);
+    const d = id.data;
+
+    const cx = RW * 0.5, cy = RH * 0.5;
+    const invX = 1 / cx, invY = 1 / cy;
+
+    for (let y = 0; y < RH; y++) {
+      for (let x = 0; x < RW; x++) {
+        const dx = (x - cx) * invX;
+        const dy = (y - cy) * invY;
+        const dist = Math.sqrt(dx * dx + dy * dy); // 0..~1.4
+        let a = (dist - 0.25) / 0.85;
+        a = clamp(a, 0, 1);
+        a = a * a; // curve
+        const alpha = (a * 200) | 0;
+
+        const i = (y * RW + x) * 4;
+        d[i] = 0; d[i + 1] = 0; d[i + 2] = 0; d[i + 3] = alpha;
+      }
+    }
+    vg.putImageData(id, 0, 0);
+
+    return { scan, vig };
+  })();
+
+  // ----------------- Rays (precompute angles) -----------------
+  const rCos = new Float32Array(RW);
+  const rSin = new Float32Array(RW);
+  const colFocus = new Float32Array(RW); // subtle “spotlight” in center
+  for (let x = 0; x < RW; x++) {
+    const t = ((x + 0.5) / RW - 0.5) * 2;       // -1..1
+    const da = t * (FOV / 2);
+    rCos[x] = Math.cos(da);
+    rSin[x] = Math.sin(da);
+    const u = 1 - Math.abs(t);
+    colFocus[x] = 0.75 + 0.25 * u;             // 0.75..1.0
+  }
+
+  // ----------------- Impact sparks (screen-space) -----------------
+  const sparks = [];
+  const impactLights = [];
+  let lastHorizon = RH >> 1;
+  let threatLevel = 0;
+
+  function spawnSparks(sx, sy, kind, power) {
+    const n = kind === "blood" ? 16 : 12;
+    const sp = kind === "blood" ? 90 : 110;
+    const col = kind === "blood" ? [255, 80, 80] : [255, 220, 140];
+    const pow = power || 1;
+
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const v = (sp * (0.35 + 0.65 * Math.random())) * pow;
+      sparks.push({
+        x: sx + (Math.random() - 0.5) * 2,
+        y: sy + (Math.random() - 0.5) * 2,
+        vx: Math.cos(a) * v,
+        vy: Math.sin(a) * v - (kind === "blood" ? 25 : 45),
+        life: 0,
+        dur: (kind === "blood" ? 220 : 180) + Math.random() * 120,
+        r: col[0], g: col[1], b: col[2],
+        s: 2,
+      });
+    }
+  }
+
+  function updateSparks(dt) {
+    if (!sparks.length) return;
+    const grav = 240;
+    for (let i = sparks.length - 1; i >= 0; i--) {
+      const p = sparks[i];
+      p.life += dt * 1000;
+      p.vy += grav * dt;
+      p.x += p.vx * dt;
+      p.y += p.vy * dt;
+      p.vx *= (1 - 0.8 * dt);
+      p.vy *= (1 - 0.25 * dt);
+      if (p.life >= p.dur || p.x < -10 || p.x > RW + 10 || p.y < -10 || p.y > RH + 10) sparks.splice(i, 1);
+    }
+  }
+
+  function drawSparks() {
+    if (!sparks.length) return;
+    for (let i = 0; i < sparks.length; i++) {
+      const p = sparks[i];
+      const a = 1 - (p.life / p.dur);
+      const alpha = clamp(a, 0, 1) * 0.85;
+      g.fillStyle = `rgba(${p.r},${p.g},${p.b},${alpha})`;
+      g.fillRect(p.x | 0, p.y | 0, p.s, p.s);
+    }
+  }
+
+  function spawnImpactLight(sx, sy, kind) {
+    const enemy = kind === "enemy";
+    impactLights.push({
+      x: sx,
+      y: sy,
+      life: 0,
+      dur: enemy ? 140 : 95,
+      r: enemy ? 255 : 255,
+      g: enemy ? 86 : 215,
+      b: enemy ? 86 : 145,
+      rad: enemy ? 22 : 16,
+    });
+  }
+
+  function updateImpactLights(dt) {
+    if (!impactLights.length) return;
+    for (let i = impactLights.length - 1; i >= 0; i--) {
+      const l = impactLights[i];
+      l.life += dt * 1000;
+      if (l.life >= l.dur) impactLights.splice(i, 1);
+    }
+  }
+
+  function drawImpactLights() {
+    if (!impactLights.length) return;
+    g.globalCompositeOperation = "lighter";
+    for (let i = 0; i < impactLights.length; i++) {
+      const l = impactLights[i];
+      const t = 1 - l.life / l.dur;
+      const a = clamp(t, 0, 1);
+      const rad = l.rad * (0.65 + 0.55 * (1 - t));
+
+      g.fillStyle = `rgba(${l.r},${l.g},${l.b},${0.18 * a})`;
+      g.fillRect((l.x - rad) | 0, (l.y - rad) | 0, (rad * 2) | 0, (rad * 2) | 0);
+      g.fillStyle = `rgba(255,255,255,${0.26 * a})`;
+      g.fillRect((l.x - 3) | 0, (l.y - 3) | 0, 6, 6);
+    }
+    g.globalCompositeOperation = "source-over";
+  }
+
+  // ----------------- Game state -----------------
+  let state = "menu";
+  const player = { x: 1.5, y: 1.5, a: 0, hp: 100, bob: 0, recoil: 0, hurt: 0, dizzy: 0, blind: 0 };
+  let score = 0, best = 0, wave = 1;
+  let killsGoal = 10;
+  let floorIndex = 0;
+  let goalUnlocked = false;
+  let machineUnlocked = false;
+  let note = "", noteT = 0;
+
+  const enemies = [];
+  let med = { x: 0, y: 0, t: 0 };
+  let mgPickup = { x: 0, y: 0, t: 0, active: false };
+  let exitGate = { x: 0, y: 0, open: false, pulse: 0 };
+  let stairs = { x: 0, y: 0, active: false, pulse: 0 };
+  let boss = { x: 0, y: 0, ax: 0, ay: 0, hp: 0, max: 0, alive: false, hurt: 0, t: 0, cd: 0, cast: 0, volley: 1 };
+  const fireballs = [];
+  let jumpscareT = 0;
+  let jumpscareCd = 0;
+
+  let shootCd = 0;
+  let flash = 0;
+  let hitMark = 0;
+  let shake = 0;
+  let weaponIndex = 0;
+
+  function setWeapon(i) {
+    if (!machineUnlocked && i > 0) {
+      setNote("MACHINE GUN IS ON FLOOR 2", 1.3);
+      return;
+    }
+    const next = clamp(i | 0, 0, WEAPONS.length - 1);
+    if (weaponIndex === next) return;
+    weaponIndex = next;
+    audio.click();
+    setNote(`${WEAPONS[weaponIndex].name} READY`, 1.2);
+  }
+
+  function startGame() {
+    if (state !== "menu" && state !== "intro") return;
+    audio.click();
+    reset();
+    state = "play";
+  }
+
+  function setNote(text, sec) {
+    note = text || "";
+    noteT = sec || 0;
+  }
+
+  function findExit(px, py) {
+    const sx = px | 0, sy = py | 0;
+    const n = MW * MH;
+    const seen = new Uint8Array(n);
+    const qx = new Int16Array(n);
+    const qy = new Int16Array(n);
+    let qh = 0, qt = 0;
+
+    if (cellAt(sx + 0.5, sy + 0.5) !== 0) return { x: 1.5, y: 1.5 };
+    seen[sy * MW + sx] = 1;
+    qx[qt] = sx; qy[qt] = sy; qt++;
+
+    let bestX = sx, bestY = sy, bestD = -1;
+
+    while (qh < qt) {
+      const x = qx[qh], y = qy[qh]; qh++;
+      const cx = x + 0.5, cy = y + 0.5;
+
+      if (canStand(cx, cy, PLAYER_R)) {
+        const dx = cx - px, dy = cy - py;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > bestD) {
+          bestD = d2;
+          bestX = x;
+          bestY = y;
+        }
+      }
+
+      if (x > 0) {
+        const i = y * MW + (x - 1);
+        if (!seen[i] && grid[i] === 0) { seen[i] = 1; qx[qt] = x - 1; qy[qt] = y; qt++; }
+      }
+      if (x + 1 < MW) {
+        const i = y * MW + (x + 1);
+        if (!seen[i] && grid[i] === 0) { seen[i] = 1; qx[qt] = x + 1; qy[qt] = y; qt++; }
+      }
+      if (y > 0) {
+        const i = (y - 1) * MW + x;
+        if (!seen[i] && grid[i] === 0) { seen[i] = 1; qx[qt] = x; qy[qt] = y - 1; qt++; }
+      }
+      if (y + 1 < MH) {
+        const i = (y + 1) * MW + x;
+        if (!seen[i] && grid[i] === 0) { seen[i] = 1; qx[qt] = x; qy[qt] = y + 1; qt++; }
+      }
+    }
+
+    return { x: bestX + 0.5, y: bestY + 0.5 };
+  }
+
+  function carveBossRoom(cx, cy) {
+    const ix = cx | 0, iy = cy | 0;
+    const t = floorWallType || 1;
+
+    // 7x7 room.
+    for (let y = iy - 3; y <= iy + 3; y++) {
+      if (y <= 1 || y >= MH - 2) continue;
+      for (let x = ix - 3; x <= ix + 3; x++) {
+        if (x <= 1 || x >= MW - 2) continue;
+        grid[y * MW + x] = 0;
+      }
+    }
+
+    // Four dodge pillars.
+    const pillars = [
+      [ix - 2, iy - 2],
+      [ix + 2, iy - 2],
+      [ix - 2, iy + 2],
+      [ix + 2, iy + 2],
+    ];
+    for (let i = 0; i < pillars.length; i++) {
+      const x = pillars[i][0], y = pillars[i][1];
+      if (x > 1 && x < MW - 2 && y > 1 && y < MH - 2) grid[y * MW + x] = t;
+    }
+
+    if (ix > 0 && ix < MW && iy > 0 && iy < MH) grid[iy * MW + ix] = 0;
+  }
+
+  function spawnBoss(x, y) {
+    boss.alive = true;
+    boss.ax = x; boss.ay = y;
+    boss.x = x; boss.y = y;
+    boss.max = BOSS_HP;
+    boss.hp = BOSS_HP;
+    boss.hurt = 0;
+    boss.t = 0;
+    boss.cd = 0;
+    boss.cast = 0;
+    boss.volley = 1;
+    boss.spr = bossImg;
+    boss.sprHurt = bossImgHurt;
+    jumpscareT = 0;
+    jumpscareCd = 0.9;
+  }
+
+  function throwFireball(angleOff) {
+    const dx = player.x - boss.x, dy = player.y - boss.y;
+    const d = hypot(dx, dy) || 1;
+    const nx = dx / d, ny = dy / d;
+
+    const c = Math.cos(angleOff), s = Math.sin(angleOff);
+    const vx = nx * c - ny * s;
+    const vy = nx * s + ny * c;
+
+    const enraged = boss.hp <= boss.max * 0.5;
+    const sp = FIRE_SPEED + (enraged ? 0.35 : 0);
+    const launch = BOSS_R + 0.18;
+
+    fireballs.push({
+      x: boss.x + vx * launch,
+      y: boss.y + vy * launch,
+      vx: vx * sp,
+      vy: vy * sp,
+      life: 0,
+      dur: 4.2,
+      r: FIRE_R,
+      dmg: FIRE_DMG,
+      sx: RW >> 1,
+      sy: lastHorizon,
+    });
+  }
+
+  function updateBoss(dt) {
+    if (!boss.alive) return;
+    boss.spr = bossImg;
+    boss.sprHurt = bossImgHurt;
+    if (fireballs.length) fireballs.length = 0;
+
+    boss.t += dt;
+    if (boss.hurt > 0) boss.hurt = Math.max(0, boss.hurt - dt);
+
+    const dxp = player.x - boss.x, dyp = player.y - boss.y;
+    const d = hypot(dxp, dyp) || 1;
+    const px = dxp / d, py = dyp / d;
+
+    const side = Math.sin(boss.t * 0.9) > 0 ? 1 : -1;
+    const tx = boss.ax + (-py) * 0.85 * side;
+    const ty = boss.ay + (px) * 0.85 * side;
+
+    const mvx = tx - boss.x, mvy = ty - boss.y;
+    const ml = hypot(mvx, mvy) || 1;
+    moveCircle(boss, (mvx / ml) * 0.55 * dt, (mvy / ml) * 0.55 * dt, BOSS_R);
+    nudgeOut(boss, BOSS_R);
+    boss.cast = 0;
+
+    // Proximity aura: wide-range blindness that ramps up through the fight.
+    const bdX = boss.x - player.x;
+    const bdY = boss.y - player.y;
+    const bd = hypot(bdX, bdY);
+    if (bd < BOSS_BLIND_R) {
+      const distT = 1 - clamp(bd / BOSS_BLIND_R, 0, 1); // 0..1
+      const rage = 1 - clamp(boss.hp / (boss.max || 1), 0, 1); // 0..1 as boss gets hurt
+      const gain = dt * BOSS_BLIND_GAIN * (0.50 + 0.75 * distT) * (0.90 + 0.95 * rage);
+      player.blind = Math.min(1, player.blind + gain);
+      if (distT > 0.50) {
+        const dz = dt * (0.16 + 0.18 * rage) * ((distT - 0.50) / 0.50);
+        player.dizzy = Math.min(1, player.dizzy + dz);
+      }
+    }
+
+    // Telepathic drain: stronger at longer distance from the boss.
+    if (bd < BOSS_MIND_R) {
+      const farT = clamp(bd / BOSS_MIND_R, 0, 1); // 0 near boss, 1 near edge of aura
+      const rage = 1 - clamp(boss.hp / (boss.max || 1), 0, 1);
+      const dps = BOSS_MIND_DPS * (0.25 + 1.05 * farT * farT) * (0.80 + 0.90 * rage);
+      player.hp -= dps * dt;
+      player.hurt = Math.min(0.35, player.hurt + dt * (0.12 + 0.22 * farT));
+      shake = Math.max(shake, 0.04 + 0.05 * farT);
+
+      boss.cd -= dt;
+      if (boss.cd <= 0) {
+        audio.hurt();
+        boss.cd = 0.40 - 0.16 * farT;
+      }
+    } else {
+      boss.cd = 0;
+    }
+
+    // Jumpscare trigger: frequent enough to feel threatening when boss is near.
+    jumpscareCd -= dt;
+    if (jumpscareCd <= 0 && bd < BOSS_JUMPSCARE_RANGE) {
+      const rage = 1 - clamp(boss.hp / (boss.max || 1), 0, 1);
+      const nearT = 1 - clamp(bd / BOSS_JUMPSCARE_RANGE, 0, 1);
+      jumpscareCd = BOSS_JUMPSCARE_CD * (0.72 - 0.30 * nearT) * (1 - 0.35 * rage);
+      jumpscareT = BOSS_JUMPSCARE_DUR;
+      player.dizzy = Math.min(1, player.dizzy + 0.46);
+      player.blind = Math.min(1, player.blind + 0.30);
+      shake = Math.max(shake, 0.30);
+      audio.jumpscare();
+    }
+  }
+
+  function updateFireballs(dt) {
+    if (!fireballs.length) return;
+
+    for (let i = fireballs.length - 1; i >= 0; i--) {
+      const f = fireballs[i];
+      f.life += dt;
+
+      const steps = Math.max(1, Math.ceil(hypot(f.vx, f.vy) * dt / 0.08));
+      const sdt = dt / steps;
+      let remove = false;
+
+      for (let s = 0; s < steps; s++) {
+        const nx = f.x + f.vx * sdt;
+        const ny = f.y + f.vy * sdt;
+
+        if (!canStand(nx, ny, f.r)) {
+          spawnSparks(f.sx || (RW >> 1), f.sy || lastHorizon, "wall", 0.9);
+          spawnImpactLight(f.sx || (RW >> 1), f.sy || lastHorizon, "wall");
+          remove = true;
+          break;
+        }
+
+        f.x = nx;
+        f.y = ny;
+
+        const dx = f.x - player.x, dy = f.y - player.y;
+        const rr = PLAYER_R + f.r;
+        if (dx * dx + dy * dy >= rr * rr) continue;
+
+        player.hp -= f.dmg;
+        player.hurt = Math.min(0.35, player.hurt + 0.28);
+        player.dizzy = Math.min(1, player.dizzy + 0.55);
+        player.blind = Math.min(1, player.blind + 0.50);
+        shake = Math.max(shake, 0.16);
+        audio.hurt();
+
+        spawnSparks(f.sx || (RW >> 1), f.sy || lastHorizon, "blood", 1.2);
+        spawnImpactLight(f.sx || (RW >> 1), f.sy || lastHorizon, "enemy");
+        remove = true;
+        break;
+      }
+
+      if (remove || f.life >= f.dur) fireballs.splice(i, 1);
+    }
+  }
+
+  function enterFloor(idx) {
+    floorIndex = clamp(idx | 0, 0, FLOOR_COUNT - 1);
+    audio.musicForFloor(floorIndex);
+    floorWallType = 1 + (floorIndex % 3);
+    loadMap(generateMapLines());
+    fireballs.length = 0;
+    boss.alive = false;
+    jumpscareT = 0;
+    jumpscareCd = 0;
+
+    const sp = findSpawn();
+    player.x = sp.x; player.y = sp.y; player.a = 0;
+    player.bob = 0; player.recoil = 0; player.hurt = 0; player.dizzy = 0; player.blind = 0;
+
+    // Pick a far reachable spot (guaranteed reachable)
+    const far = findExit(player.x, player.y);
+
+    // Reset objectives
+    stairs.active = floorIndex < FLOOR_COUNT - 1;
+    stairs.pulse = 0;
+    exitGate.pulse = 0;
+
+    if (stairs.active) {
+      // Floors 1..(N-1): stairs exist, exit disabled
+      stairs.x = far.x; stairs.y = far.y;
+      exitGate.x = 0; exitGate.y = 0; exitGate.open = false;
+      setNote(`FLOOR ${floorIndex + 1}/${FLOOR_COUNT} - FIND STAIRS`, 2.6);
+    } else {
+      // Top floor: exit exists, stairs disabled
+      stairs.x = 0; stairs.y = 0;
+      exitGate.x = far.x; exitGate.y = far.y;
+      exitGate.open = false;
+      carveBossRoom(exitGate.x, exitGate.y);
+      spawnBoss(exitGate.x, exitGate.y);
+      setNote("FINAL FLOOR - DEFEAT THE BOSS", 2.8);
+    }
+
+    shootCd = 0;
+    flash = 0;
+    hitMark = 0;
+    shake = 0;
+
+    enemies.length = 0;
+    const startEnemies = (floorIndex === FLOOR_COUNT - 1) ? 3 : (BASE_ENEMIES + floorIndex);
+    for (let i = 0; i < startEnemies; i++) spawnEnemy();
+
+    spawnMedkit();
+
+    mgPickup.active = false;
+    mgPickup.t = 0;
+    mgPickup.x = 0;
+    mgPickup.y = 0;
+    if (!machineUnlocked && floorIndex === 1) {
+      spawnMachineGunPickup(stairs.x || player.x, stairs.y || player.y);
+      setNote("FLOOR 2 - MACHINE GUN OPTIONAL", 2.4);
+    }
+
+    if (!machineUnlocked) weaponIndex = 0;
+  }
+
+  function reset() {
+    state = "play";
+    player.hp = 100;
+
+    score = 0;
+    wave = 1;
+    floorIndex = 0;
+    goalUnlocked = false;
+    machineUnlocked = false;
+    weaponIndex = 0;
+    killsGoal = 10;
+    sparks.length = 0;
+    impactLights.length = 0;
+    fireballs.length = 0;
+    boss.alive = false;
+    jumpscareT = 0;
+    jumpscareCd = 0;
+
+    enterFloor(0);
+  }
+
+  function spawnMedkit() {
+    for (let tries = 0; tries < 400; tries++) {
+      const x = rand(1.5, MW - 1.5);
+      const y = rand(1.5, MH - 1.5);
+      if (isWall(x, y)) continue;
+      const dx = x - player.x, dy = y - player.y;
+      if (dx * dx + dy * dy < 5) continue;
+      med.x = x; med.y = y; med.t = 0;
+      return;
+    }
+    med.x = 0; med.y = 0;
+  }
+
+  function spawnMachineGunPickup(avoidX, avoidY) {
+    mgPickup.active = false;
+    mgPickup.t = 0;
+    mgPickup.x = 0;
+    mgPickup.y = 0;
+
+    for (let tries = 0; tries < 500; tries++) {
+      const x = rand(1.5, MW - 1.5);
+      const y = rand(1.5, MH - 1.5);
+      if (!canStand(x, y, PLAYER_R)) continue;
+
+      const dpX = x - player.x, dpY = y - player.y;
+      if (dpX * dpX + dpY * dpY < 12) continue;
+
+      const daX = x - avoidX, daY = y - avoidY;
+      if (daX * daX + daY * daY < 8) continue;
+
+      mgPickup.x = x;
+      mgPickup.y = y;
+      mgPickup.active = true;
+      return;
+    }
+
+    // Guaranteed fallback so progression cannot soft-lock.
+    const fb = findExit(player.x, player.y);
+    mgPickup.x = fb.x;
+    mgPickup.y = fb.y;
+    mgPickup.active = true;
+  }
+
+  function spawnEnemy() {
+    for (let tries = 0; tries < 250; tries++) {
+      const x = rand(1.5, MW - 1.5);
+      const y = rand(1.5, MH - 1.5);
+      if (!canStand(x, y, ENEMY_R)) continue;
+      const dx = x - player.x, dy = y - player.y;
+      if (dx * dx + dy * dy < 9) continue;
+      const v = crookVariants.length ? crookVariants[(Math.random() * crookVariants.length) | 0] : null;
+
+      const type = Math.random() < 0.25 + 0.02 * (wave - 1) ? 1 : 0; // 1=tank
+      enemies.push({
+        x, y,
+        hp: type ? 4 : 2,
+        type,
+        t: rand(0, 10),
+        hurt: 0,
+        pathT: 0,
+        pathGoal: -1,
+        tx: x,
+        ty: y,
+        spr: v ? v.normal : enemyImg,
+        sprHurt: v ? v.hurt : enemyImgHurt,
+      });
+      return;
+    }
+  }
+
+  // ----------------- Raycast (DDA) -----------------
+  function castFrom(px, py, dx, dy) {
+    let mapX = px | 0;
+    let mapY = py | 0;
+
+    const invDx = dx !== 0 ? 1 / dx : 1e9;
+    const invDy = dy !== 0 ? 1 / dy : 1e9;
+
+    const deltaX = Math.abs(invDx);
+    const deltaY = Math.abs(invDy);
+
+    let stepX, stepY, sideX, sideY;
+
+    if (dx < 0) { stepX = -1; sideX = (px - mapX) * deltaX; }
+    else { stepX = 1; sideX = (mapX + 1 - px) * deltaX; }
+
+    if (dy < 0) { stepY = -1; sideY = (py - mapY) * deltaY; }
+    else { stepY = 1; sideY = (mapY + 1 - py) * deltaY; }
+
+    let side = 0;
+    for (let i = 0; i < MAX_RAY_STEPS; i++) {
+      if (sideX < sideY) { sideX += deltaX; mapX += stepX; side = 0; }
+      else { sideY += deltaY; mapY += stepY; side = 1; }
+
+      if (mapX < 0 || mapY < 0 || mapX >= MW || mapY >= MH) break;
+
+      const t = grid[mapY * MW + mapX];
+      if (t) {
+        const dist = side === 0
+          ? (mapX - px + (1 - stepX) * 0.5) * invDx
+          : (mapY - py + (1 - stepY) * 0.5) * invDy;
+
+        const d = Math.max(0.0001, dist);
+
+        const hx = px + d * dx;
+        const hy = py + d * dy;
+        let u = side === 0 ? (hy - (hy | 0)) : (hx - (hx | 0));
+        if (u < 0) u += 1;
+
+        return { d, side, u, t };
+      }
+    }
+    return { d: 999, side: 0, u: 0, t: 1 };
+  }
+
+  // ----------------- Shooting (hitscan) -----------------
+  function shoot() {
+    if (state !== "play") return;
+    if (shootCd > 0) return;
+
+    const wpn = WEAPONS[weaponIndex];
+    audio.userGesture();
+    audio.shoot(wpn.snd);
+
+    shootCd = wpn.cd;
+    flash = wpn.flash;
+    hitMark = 0;
+    player.recoil = Math.min(wpn.recoilMax, player.recoil + wpn.recoilAdd);
+    shake = Math.max(shake, 0.10);
+    const sx = RW >> 1;
+    const sy = lastHorizon;
+
+    const ra = player.a + (Math.random() * 2 - 1) * wpn.spread + player.recoil * (wpn.auto ? 0.03 : 0.01);
+    const rdx = Math.cos(ra), rdy = Math.sin(ra);
+
+    const wallDist = castFrom(player.x, player.y, rdx, rdy).d;
+
+    let bestI = -1;
+    let bestD = 1e9;
+
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      const fx = e.x - player.x, fy = e.y - player.y;
+      const t = fx * rdx + fy * rdy;
+      if (t <= 0) continue;
+
+      const d2 = (fx * fx + fy * fy) - t * t;
+      if (d2 > ENEMY_R * ENEMY_R) continue;
+
+      const thc = Math.sqrt(Math.max(0, ENEMY_R * ENEMY_R - d2));
+      const hitD = t - thc;
+      if (hitD > 0 && hitD < bestD) {
+        bestD = hitD;
+        bestI = i;
+      }
+    }
+
+    let hitBoss = false;
+    let bossHitD = 1e9;
+
+    if (boss.alive) {
+      const fx = boss.x - player.x, fy = boss.y - player.y;
+      const t = fx * rdx + fy * rdy;
+      if (t > 0) {
+        const d2 = (fx * fx + fy * fy) - t * t;
+        if (d2 <= BOSS_R * BOSS_R) {
+          const thc = Math.sqrt(Math.max(0, BOSS_R * BOSS_R - d2));
+          bossHitD = t - thc;
+          if (bossHitD > 0) hitBoss = true;
+        }
+      }
+    }
+
+    const bossWins = hitBoss && bossHitD < bestD;
+    if ((bossWins ? bossHitD : bestD) < wallDist) {
+      if (bossWins) {
+        boss.hp -= 1;
+        boss.hurt = 0.22;
+        hitMark = 0.18;
+        spawnSparks(sx + (Math.random() - 0.5) * 5, sy + (Math.random() - 0.5) * 5, "blood", 1.2);
+        spawnImpactLight(sx, sy, "enemy");
+        audio.hit();
+
+        if (boss.hp <= 0) {
+          boss.alive = false;
+          exitGate.open = true;
+          setNote("BOSS DOWN - EXIT OPEN", 3.0);
+          audio.kill();
+          shake = Math.max(shake, 0.18);
+        }
+      } else if (bestI >= 0) {
+        const e = enemies[bestI];
+        e.hp -= 1;
+        e.hurt = 0.18;
+        hitMark = 0.14;
+
+        audio.hit();
+        moveCircle(e, rdx * wpn.knock, rdy * wpn.knock, ENEMY_R);
+        nudgeOut(e, ENEMY_R);
+        spawnSparks(sx + (Math.random() - 0.5) * 4, sy + (Math.random() - 0.5) * 4, "blood", 1);
+        spawnImpactLight(sx, sy, "enemy");
+
+        if (e.hp <= 0) {
+          enemies.splice(bestI, 1);
+          score++;
+          hitMark = 0.22;
+          audio.kill();
+          shake = Math.max(shake, 0.12);
+
+          if (score > best) best = score;
+          if (!goalUnlocked && score >= killsGoal) {
+            goalUnlocked = true;
+            if (floorIndex === FLOOR_COUNT - 1) {
+              if (!boss.alive) {
+                exitGate.open = true;
+                setNote("EXIT OPEN - REACH THE PORTAL", 3.0);
+              } else {
+                setNote("BOSS GUARDS THE EXIT", 2.2);
+              }
+            } else {
+              setNote(`GO TO FLOOR ${FLOOR_COUNT} - EXIT UNLOCKED`, 3.0);
+            }
+            audio.pickup();
+          }
+
+          const spawnCap = (floorIndex === FLOOR_COUNT - 1)
+            ? 3
+            : (BASE_ENEMIES - 1 + floorIndex + (wave >> 2));
+          if (score > 0 && (score % 6) === 0) {
+            wave++;
+            spawnEnemy();
+            if (enemies.length < spawnCap) spawnEnemy();
+          } else if (enemies.length < spawnCap) {
+            spawnEnemy();
+          }
+        }
+      }
+    } else {
+      spawnSparks(sx + (Math.random() - 0.5) * 6, sy + (Math.random() - 0.5) * 6, "wall", 1);
+    }
+  }
+
+  // ----------------- Movement + collision -----------------
+  function movePlayer(dt) {
+    const mouseTurn = 0.0026;
+    const keyTurn = 2.4;
+
+    player.a += mouseDX * mouseTurn;
+    const turnL = (keys["arrowleft"] || keys["q"]) ? 1 : 0;
+    const turnR = (keys["arrowright"] || keys["e"]) ? 1 : 0;
+    player.a += (turnR - turnL) * keyTurn * dt;
+    mouseDX = 0;
+
+    if (player.a > Math.PI) player.a -= Math.PI * 2;
+    if (player.a < -Math.PI) player.a += Math.PI * 2;
+
+    const fwd = (keys["w"] || keys["arrowup"]) ? 1 : 0;
+    const back = (keys["s"] || keys["arrowdown"]) ? 1 : 0;
+    const left = keys["a"] ? 1 : 0;
+    const right = keys["d"] ? 1 : 0;
+
+    let vx = 0, vy = 0;
+    const ca = Math.cos(player.a), sa = Math.sin(player.a);
+
+    const speed = keys["shift"] ? 3.6 : 2.7;
+
+    vx += (fwd - back) * ca;
+    vy += (fwd - back) * sa;
+
+    vx += (left - right) * sa;
+    vy += (right - left) * ca;
+
+    const len = hypot(vx, vy);
+    let moving = false;
+    if (len > 0) { vx /= len; vy /= len; moving = true; }
+
+    const oldX = player.x, oldY = player.y;
+    const moveX = vx * speed * dt;
+    const moveY = vy * speed * dt;
+    moveCircle(player, moveX, moveY, PLAYER_R);
+    nudgeOut(player, PLAYER_R);
+
+    const moved = hypot(player.x - oldX, player.y - oldY) > 0.0004;
+    if (moving && moved) {
+      const sprint = keys["shift"] ? 1 : 0.72;
+      player.bob += dt * (keys["shift"] ? 10 : 7);
+      audio.footstep(sprint, dt);
+    } else {
+      player.bob *= Math.max(0, 1 - dt * 10);
+      audio.footstep(0, dt);
+    }
+  }
+
+  // ----------------- Enemies + pickup -----------------
+  function updateEnemies(dt) {
+    // separation
+    for (let i = 0; i < enemies.length; i++) {
+      const a = enemies[i];
+      for (let j = i + 1; j < enemies.length; j++) {
+        const b = enemies[j];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d2 = dx * dx + dy * dy;
+        const min = (ENEMY_R * 2) * (ENEMY_R * 2);
+        if (d2 > 0.0001 && d2 < min) {
+          const d = Math.sqrt(d2);
+          const push = (ENEMY_R * 2 - d) * 0.18;
+          const nx = dx / d, ny = dy / d;
+          moveCircle(a, -nx * push, -ny * push, ENEMY_R);
+          moveCircle(b, nx * push, ny * push, ENEMY_R);
+        }
+      }
+    }
+
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      e.t += dt;
+      if (e.hurt > 0) e.hurt -= dt;
+
+      const dx = player.x - e.x;
+      const dy = player.y - e.y;
+      const d2 = dx * dx + dy * dy;
+      const d = Math.sqrt(d2);
+
+      // attack
+      if (d < 0.72) {
+        const dmg = (e.type ? 26 : 18) * dt;
+        player.hp -= dmg;
+        player.hurt = Math.min(0.35, player.hurt + dt * 1.4);
+        shake = Math.max(shake, 0.14);
+        audio.hurt();
+        continue;
+      }
+
+      // Only pathfind once player is near enough to be detected.
+      if (d2 > ENEMY_DETECT_R * ENEMY_DETECT_R) {
+        e.pathGoal = -1;
+        e.pathT = 0;
+        e.tx = e.x;
+        e.ty = e.y;
+        continue;
+      }
+
+      // A* path step toward player (recomputed in short intervals or when target cell changes)
+      const ex = e.x | 0, ey = e.y | 0;
+      const pxc = player.x | 0, pyc = player.y | 0;
+      const goalId = pyc * MW + pxc;
+      e.pathT -= dt;
+
+      const tdX = e.tx - e.x;
+      const tdY = e.ty - e.y;
+      const nearTarget = (tdX * tdX + tdY * tdY) < 0.06 * 0.06;
+      if (e.pathT <= 0 || e.pathGoal !== goalId || nearTarget) {
+        const step = aStarNextStep(ex, ey, pxc, pyc);
+        if (step) { e.tx = step.x; e.ty = step.y; }
+        else { e.tx = player.x; e.ty = player.y; }
+        e.pathGoal = goalId;
+        e.pathT = 0.18 + Math.random() * 0.06;
+      }
+
+      let vx = e.tx - e.x;
+      let vy = e.ty - e.y;
+      const vl = hypot(vx, vy) || 1;
+      vx /= vl; vy /= vl;
+
+      const wob = Math.sin(e.t * (e.type ? 2.2 : 3.7)) * (e.type ? 0.05 : 0.08);
+      const c = Math.cos(wob), s = Math.sin(wob);
+      const mvx = vx * c - vy * s;
+      const mvy = vx * s + vy * c;
+
+      const sp = (e.type ? 0.95 : 1.35) + 0.02 * (wave - 1);
+      const moved = moveCircle(e, mvx * sp * dt, mvy * sp * dt, ENEMY_R);
+      if (!moved) e.pathT = 0; // force fresh A* on next frame
+
+      nudgeOut(e, ENEMY_R);
+    }
+  }
+
+  function updatePickup(dt) {
+    if (med.x !== 0) {
+      med.t += dt;
+
+      const dx = med.x - player.x, dy = med.y - player.y;
+      if (dx * dx + dy * dy < 0.45 * 0.45) {
+        player.hp = Math.min(100, player.hp + 45);
+        audio.pickup();
+        spawnMedkit();
+      }
+    }
+
+    if (mgPickup.active) {
+      mgPickup.t += dt;
+      const dx = mgPickup.x - player.x, dy = mgPickup.y - player.y;
+      if (dx * dx + dy * dy < 0.45 * 0.45) {
+        mgPickup.active = false;
+        machineUnlocked = true;
+        setWeapon(1);
+        setNote("MACHINE GUN ACQUIRED", 2.0);
+        flash = Math.max(flash, 0.12);
+        shake = Math.max(shake, 0.14);
+        audio.pickup();
+      }
+    }
+  }
+
+  function updateExit(dt) {
+    exitGate.pulse += dt;
+    stairs.pulse += dt;
+
+    // Stairs: go to next floor
+    if (stairs.active) {
+      const dx = stairs.x - player.x, dy = stairs.y - player.y;
+      if (dx * dx + dy * dy < 0.52 * 0.52) {
+        audio.pickup();
+        shake = Math.max(shake, 0.12);
+        enterFloor(floorIndex + 1);
+        return;
+      }
+    }
+
+    // Exit: only on top floor and only when open
+    if (floorIndex === FLOOR_COUNT - 1 && exitGate.x !== 0) {
+      if (exitGate.open) {
+        const dx = exitGate.x - player.x, dy = exitGate.y - player.y;
+        if (dx * dx + dy * dy < 0.52 * 0.52) {
+          state = "won";
+          audio.stopMusic();
+          const total = score + 10;
+          if (total > best) best = total;
+          setNote("YOU ESCAPED", 2.2);
+          shake = Math.max(shake, 0.16);
+          audio.pickup();
+        }
+      }
+    }
+  }
+
+  // ----------------- Rendering (pixel framebuffer) -----------------
+  const img = g.createImageData(RW, RH);
+  const px = new Uint32Array(img.data.buffer);
+  const zbuf = new Float32Array(RW);
+
+  function normAng(a) {
+    while (a > Math.PI) a -= Math.PI * 2;
+    while (a < -Math.PI) a += Math.PI * 2;
+    return a;
+  }
+
+  function wallShade(dist, side, colMul) {
+    let s = (1 / (1 + dist * dist * 0.14)) * (SH - 1);
+    if (side) s *= 0.72;
+    s *= colMul;
+    return clamp(s | 0, 0, SH - 1);
+  }
+
+  function floorShade(dist) {
+    let s = (1 / (1 + dist * dist * 0.10)) * (SH - 1);
+    return clamp(s | 0, 0, SH - 1);
+  }
+
+  function getObjective() {
+    if (state !== "play") return null;
+
+    if (boss.alive) {
+      return { x: boss.x, y: boss.y, label: "BOSS", col: "rgba(255,80,80,0.95)" };
+    }
+    if (stairs.active) {
+      return { x: stairs.x, y: stairs.y, label: "STAIRS", col: "rgba(255,205,90,0.95)" };
+    }
+    if (mgPickup.active) {
+      return { x: mgPickup.x, y: mgPickup.y, label: "MACHINE GUN", col: "rgba(255,170,90,0.95)" };
+    }
+    if (exitGate.x !== 0) {
+      return {
+        x: exitGate.x,
+        y: exitGate.y,
+        label: exitGate.open ? "EXIT" : "EXIT (LOCKED)",
+        col: exitGate.open ? "rgba(110,240,255,0.95)" : "rgba(180,80,80,0.95)",
+      };
     }
     return null;
   }
 
-  draw(g, snake, showPath) {
-    g.clear();
+  // Draw a big arrow at the top that slides left/right based on direction.
+  // If objective is outside FOV, it clamps to the edge and points inward.
+  function drawObjectiveArrow() {
+    const o = getObjective();
+    if (!o) return;
 
-    // Playfield background
-    g.fillStyle(THEME.playBg, 1);
-    g.fillRect(0, PLAY_TOP, SCREEN_W, PLAY_BOTTOM - PLAY_TOP);
+    const dx = o.x - player.x, dy = o.y - player.y;
+    const rel = normAng(Math.atan2(dy, dx) - player.a);
 
-    const visRows = Math.max(8, ((PLAY_BOTTOM - PLAY_TOP) / TILE) | 0);
+    const edge = Math.abs(rel) > FOV * 0.45;
+    const a = clamp(rel, -FOV * 0.45, FOV * 0.45);
 
-    let camBottom = 0;
-    if (snake) {
-      camBottom = (snake.headY - ((visRows * 0.35) | 0)) | 0;
-      const maxCam = this.revealedHeight - visRows;
-      if (maxCam > 0) camBottom = clamp(camBottom, 0, maxCam);
-      else camBottom = 0;
-    }
+    let ax = (RW / 2 + Math.tan(a) * PROJ) | 0;
+    ax = clamp(ax, 14, RW - 14);
 
-    // expose for UI layers
-    this.lastCamBottom = camBottom;
-    this.lastVisRows = visRows;
+    const ay = 44;
 
-    const yMin = camBottom;
-    const yMax = camBottom + visRows - 1;
-
-    // Tiles
-    for (let y = yMin; y <= yMax; y++) {
-      if (y < 0 || y >= this.revealedHeight) continue;
-      const chunk = this.chunks[(y / CHUNK_H) | 0];
-
-      for (let x = 0; x < GRID_W; x++) {
-        const r = toScreen(x, y, camBottom);
-        const k = y * GRID_W + x;
-
-        const free = chunk.free.has(k);
-        const visited = snake && snake.visited.has(k);
-
-        if (!free) {
-          // Bomb (simple / dark)
-          g.fillStyle(THEME.tileBomb, 1);
-          g.fillRect(r.x, r.y, TILE - 1, TILE - 1);
-        } else if (visited) {
-          // Trail (permanent)
-          g.fillStyle(THEME.tileTrail, 1);
-          g.fillRect(r.x, r.y, TILE - 1, TILE - 1);
-          g.fillStyle(THEME.tileTrailInset, 0.34);
-          g.fillRect(r.x + 4, r.y + 4, TILE - 9, TILE - 9);
-        } else {
-          // Free
-          g.fillStyle(THEME.tileFree, 1);
-          g.fillRect(r.x, r.y, TILE - 1, TILE - 1);
-        }
+    // arrow
+    g.fillStyle = o.col;
+    g.beginPath();
+    if (edge) {
+      if (rel < 0) { // left
+        g.moveTo(10, ay);
+        g.lineTo(22, ay - 7);
+        g.lineTo(22, ay + 7);
+      } else { // right
+        g.moveTo(RW - 10, ay);
+        g.lineTo(RW - 22, ay - 7);
+        g.lineTo(RW - 22, ay + 7);
       }
-    }
-
-    // Canonical path (hint) - draw OVER tiles so toggle is clearly visible.
-    if (showPath) {
-      g.lineStyle(3, 0x5ab6ff, 0.58);
-      g.beginPath();
-
-      const cStart = (yMin / CHUNK_H) | 0;
-      const cEnd = (yMax / CHUNK_H) | 0;
-
-      for (let c = cStart; c <= cEnd && c < this.revealed; c++) {
-        const p = this.chunks[c].path;
-        for (let i = 0; i < p.length - 1; i++) {
-          const a = p[i],
-            b = p[i + 1];
-          const ay = (a / GRID_W) | 0,
-            by = (b / GRID_W) | 0;
-          if ((ay < yMin && by < yMin) || (ay > yMax && by > yMax)) continue;
-
-          const ax = a % GRID_W,
-            bx = b % GRID_W;
-          const pa = cellCenter(ax, ay, camBottom);
-          const pb = cellCenter(bx, by, camBottom);
-          g.moveTo(pa.x, pa.y);
-          g.lineTo(pb.x, pb.y);
-        }
-      }
-
-      // Connect chunk boundaries
-      for (let c = cStart; c < cEnd && c + 1 < this.revealed; c++) {
-        const a = this.chunks[c].path[this.chunks[c].path.length - 1];
-        const b = this.chunks[c + 1].path[0];
-        const ay = (a / GRID_W) | 0,
-          by = (b / GRID_W) | 0;
-        if ((ay < yMin && by < yMin) || (ay > yMax && by > yMax)) continue;
-
-        const ax = a % GRID_W,
-          bx = b % GRID_W;
-        const pa = cellCenter(ax, ay, camBottom);
-        const pb = cellCenter(bx, by, camBottom);
-        g.moveTo(pa.x, pa.y);
-        g.lineTo(pb.x, pb.y);
-      }
-
-      g.strokePath();
-    }
-
-    // Head
-    if (snake) {
-      const r = toScreen(snake.headX, snake.headY, camBottom);
-      g.fillStyle(0xfff06a, 1);
-      g.fillRect(r.x + 4, r.y + 4, TILE - 9, TILE - 9);
-      g.lineStyle(2, 0xffffff, 0.45);
-      g.strokeRect(r.x + 2, r.y + 2, TILE - 5, TILE - 5);
-    }
-
-    // Expand flash
-    if (this.expandFlash > 0) {
-      g.fillStyle(0xffffff, 0.08 * this.expandFlash);
-      g.fillRect(0, PLAY_TOP, SCREEN_W, PLAY_BOTTOM - PLAY_TOP);
-      this.expandFlash = Math.max(0, this.expandFlash - 0.05);
-    }
-  }
-}
-
-class Snake {
-  constructor(world) {
-    this.world = world;
-    this.visited = new Set();
-    this.reset();
-  }
-
-  reset() {
-    this.headX = GRID_W - 1;
-    this.headY = 0;
-
-    this.dirX = -1;
-    this.dirY = 0;
-
-    this.wantX = this.dirX;
-    this.wantY = this.dirY;
-    this.turnQueue = [];
-
-    this.visited.clear();
-    this.visited.add(this.key(this.headX, this.headY));
-
-    this.len = 1;
-    this.time = 0;
-    this.acc = 0;
-    this.lives = START_LIVES;
-
-    this.maxY = this.headY;
-
-    this.dead = false;
-    this.deathReason = "";
-    this.expandedCount = 0;
-    this.respawnCount = 0;
-    this.lastRespawnReason = "";
-    this.waitingForMove = false;
-    this.waitingReason = "";
-  }
-
-  key(x, y) {
-    return y * GRID_W + x;
-  }
-
-  chunkLevel() {
-    const byMax = (this.maxY / CHUNK_H) | 0;
-    const byHead = (this.headY / CHUNK_H) | 0;
-    return Math.max(byMax, byHead) + 1;
-  }
-
-  currentScore() {
-    return Math.max(0, (this.chunkLevel() - 1) * 1000 + this.len);
-  }
-
-  restoreVisitedForRespawn(latestChunk) {
-    this.visited.clear();
-    for (let c = 0; c < latestChunk; c++) {
-      const chunk = this.world.chunks[c];
-      if (!chunk) continue;
-      for (const key of chunk.free) this.visited.add(key);
-    }
-  }
-
-  setWantedDir(dx, dy) {
-    const wasWaitingForMove = this.waitingForMove;
-    if (wasWaitingForMove) {
-      this.waitingForMove = false;
-      this.waitingReason = "";
-      this.acc = 0;
-    }
-
-    const last = this.turnQueue.length
-      ? this.turnQueue[this.turnQueue.length - 1]
-      : { x: this.wantX, y: this.wantY };
-
-    if (dx === last.x && dy === last.y) return;
-    if (dx === -last.x && dy === -last.y) {
-      if (wasWaitingForMove) this.waitingForMove = true;
-      return;
-    }
-
-    if (this.turnQueue.length >= 2) this.turnQueue.shift();
-    this.turnQueue.push({ x: dx, y: dy });
-  }
-
-  step(dt) {
-    if (this.dead) return;
-    if (this.waitingForMove) return;
-
-    this.time += dt / 1000;
-    this.acc += dt;
-
-    const stepMs = this.moveIntervalMs();
-
-    while (this.acc >= stepMs) {
-      this.acc -= stepMs;
-      const moved = this.moveOne();
-      if (this.dead) return;
-      if (!moved) break;
-
-      if (this.world.maybeExpand(this)) {
-        this.expandedCount++;
-        this.waitingForMove = true;
-        this.waitingReason = "NEW TILES: CHOOSE MOVE";
-        this.turnQueue.length = 0;
-        this.acc = 0;
-        break;
-      }
-
-      if (!this.hasAnyValidMove()) {
-        this.respawnAtLatestChunk("NO VALID MOVES");
-        break;
-      }
-
-      if (!this.isRemainingReachable()) {
-        this.respawnAtLatestChunk("PATH BLOCKED");
-        break;
-      }
-    }
-  }
-
-  moveIntervalMs() {
-    const chunkPressure = Math.max(0, this.world.revealed - START_CHUNKS);
-    const base = Math.max(80, 240 - chunkPressure * 10);
-    return base / SPEED_DIAL;
-  }
-
-  hasAnyValidMove() {
-    const dirs = [
-      [1, 0],
-      [-1, 0],
-      [0, 1],
-      [0, -1],
-    ];
-    for (let i = 0; i < dirs.length; i++) {
-      const dx = dirs[i][0];
-      const dy = dirs[i][1];
-      const nx = this.headX + dx;
-      const ny = this.headY + dy;
-      const k = this.key(nx, ny);
-      if (this.world.isFree(nx, ny) && !this.visited.has(k)) return true;
-    }
-    return false;
-  }
-
-  isRemainingReachable() {
-    const remaining = this.world.totalFree - this.len;
-    if (remaining <= 0) return true;
-
-    const headKey = this.key(this.headX, this.headY);
-    const seen = new Set([headKey]);
-    const qx = [this.headX];
-    const qy = [this.headY];
-    let qi = 0;
-    let reachableUnvisited = 0;
-
-    while (qi < qx.length) {
-      const x = qx[qi];
-      const y = qy[qi];
-      qi++;
-
-      const neighbors = [
-        [x + 1, y],
-        [x - 1, y],
-        [x, y + 1],
-        [x, y - 1],
-      ];
-      for (let i = 0; i < neighbors.length; i++) {
-        const nx = neighbors[i][0];
-        const ny = neighbors[i][1];
-        if (!this.world.isFree(nx, ny)) continue;
-
-        const nk = this.key(nx, ny);
-        if (seen.has(nk)) continue;
-        if (nk !== headKey && this.visited.has(nk)) continue;
-
-        seen.add(nk);
-        qx.push(nx);
-        qy.push(ny);
-
-        if (!this.visited.has(nk)) {
-          reachableUnvisited++;
-          if (reachableUnvisited >= remaining) return true;
-        }
-      }
-    }
-
-    return reachableUnvisited >= remaining;
-  }
-
-  respawnAtLatestChunk(reason) {
-    this.lives = Math.max(0, this.lives - 1);
-    if (this.lives <= 0) {
-      this.die(`OUT OF LIVES (${reason})`);
-      return;
-    }
-
-    const latestChunk = Math.max(0, this.world.revealed - 1);
-    this.headX = GRID_W - 1;
-    this.headY = latestChunk * CHUNK_H;
-    this.maxY = Math.max(this.maxY, this.headY);
-    this.dirX = -1;
-    this.dirY = 0;
-    this.wantX = this.dirX;
-    this.wantY = this.dirY;
-
-    this.restoreVisitedForRespawn(latestChunk);
-    this.visited.add(this.key(this.headX, this.headY));
-    this.len = this.visited.size;
-
-    this.waitingForMove = true;
-    this.waitingReason = "RESPAWN: CHOOSE MOVE";
-    this.turnQueue.length = 0;
-    this.acc = 0;
-
-    this.lastRespawnReason = reason;
-    this.respawnCount++;
-  }
-
-  moveOne() {
-    if (this.turnQueue.length > 0) {
-      const next = this.turnQueue.shift();
-      this.wantX = next.x;
-      this.wantY = next.y;
-    }
-
-    this.dirX = this.wantX;
-    this.dirY = this.wantY;
-
-    const nx = this.headX + this.dirX;
-    const ny = this.headY + this.dirY;
-
-    if (!this.world.isFree(nx, ny)) {
-      this.respawnAtLatestChunk("HIT WALL");
-      return false;
-    }
-
-    const k = this.key(nx, ny);
-    if (this.visited.has(k)) {
-      this.respawnAtLatestChunk("HIT YOUR TRAIL");
-      return false;
-    }
-
-    this.headX = nx;
-    this.headY = ny;
-    this.visited.add(k);
-    this.len++;
-
-    if (ny > this.maxY) this.maxY = ny;
-    return true;
-  }
-
-  die(msg) {
-    this.dead = true;
-    this.deathReason = msg;
-  }
-}
-
-// ---------- Chunk generator (guaranteed solvable) ----------
-function generateChunk(seed, idx, chunksLoaded) {
-  const yBase = idx * CHUNK_H;
-  const rng = new Rng(seed ^ Math.imul(idx + 1, 0x9e3779b9));
-  const turnDifficulty = clamp(((chunksLoaded || 1) - START_CHUNKS) / 14, 0, 1);
-  const pairChance = 0.3 + 0.6 * turnDifficulty;
-  const dipChance = 0.35 + 0.6 * turnDifficulty;
-  const requiredDips = Math.floor(turnDifficulty * 4);
-  const shiftMax = Math.max(1, Math.round(MAX_ROW_SHIFT + 2 - 3 * turnDifficulty));
-  const zigzagBias = 0.15 + 0.75 * turnDifficulty;
-  const forcedReversalsTarget = Math.floor(turnDifficulty * 8);
-  const edgeSweepChance = Math.max(0.03, LONG_SWEEP_CHANCE * (1 - 0.75 * turnDifficulty));
-
-  const free = new Set();
-  const path = [];
-
-  function add(x, y) {
-    const k = y * GRID_W + x;
-    if (!free.has(k)) {
-      free.add(k);
-      path.push(k);
-    }
-  }
-
-  function pickTargetX(currentX, forceLongSweep, preferredDir, forcePreferredDir) {
-    let targetX;
-    if (!forceLongSweep && preferredDir && (forcePreferredDir || rng.next() < zigzagBias)) {
-      const span = 1 + rng.int(shiftMax);
-      targetX = clamp(currentX + preferredDir * span, 0, GRID_W - 1);
-    } else if (rng.next() < edgeSweepChance) {
-      targetX = rng.next() < 0.5 ? 0 : GRID_W - 1;
     } else {
-      const span = 1 + rng.int(shiftMax);
-      const dir = rng.next() < 0.5 ? -1 : +1;
-      targetX = clamp(currentX + dir * span, 0, GRID_W - 1);
+      g.moveTo(ax, ay - 8);
+      g.lineTo(ax - 8, ay + 8);
+      g.lineTo(ax + 8, ay + 8);
     }
-
-    if (targetX === currentX) {
-      targetX =
-        currentX < (GRID_W >> 1) ? Math.min(GRID_W - 1, currentX + 1) : Math.max(0, currentX - 1);
-    }
-
-    if (forcePreferredDir && preferredDir) {
-      const actualDir = targetX > currentX ? 1 : -1;
-      if (actualDir !== preferredDir) {
-        const span = forceLongSweep ? 2 : 1;
-        targetX = clamp(currentX + preferredDir * span, 0, GRID_W - 1);
-      }
-    }
-
-    if (forceLongSweep && Math.abs(targetX - currentX) < 2) {
-      if (currentX <= 1) targetX = Math.min(GRID_W - 1, currentX + 2);
-      else if (currentX >= GRID_W - 2) targetX = Math.max(0, currentX - 2);
-      else targetX = currentX + (rng.next() < 0.5 ? -2 : 2);
-    }
-
-    return targetX;
+    g.closePath();
+    g.fill();
   }
 
-  let x = GRID_W - 1;
-  let y = yBase;
-  let downMoves = 0;
-  let lastHorizDir = 0;
-  let forcedReversalsDone = 0;
-  add(x, y);
+  function drawEnemySprites(list, horizon) {
+    if (!enemyImgReady || !list || list.length === 0) return;
 
-  while (y < yBase + CHUNK_H - 1) {
-    const localY = y - yBase;
-    const canUseTwoRows = localY <= CHUNK_H - 3;
-    const needMoreDips = downMoves < requiredDips;
-    const useTwoRows = canUseTwoRows && (needMoreDips || rng.next() < pairChance);
-    const forceReversal = lastHorizDir !== 0 && forcedReversalsDone < forcedReversalsTarget;
-    const preferredDir = -lastHorizDir;
-    const targetX = pickTargetX(x, useTwoRows && needMoreDips, preferredDir, forceReversal);
-    const segmentDir = x === targetX ? 0 : targetX > x ? 1 : -1;
+    g.imageSmoothingEnabled = true;
 
-    if (useTwoRows) {
-      while (x !== targetX) {
-        const dir = targetX > x ? 1 : -1;
-        const remaining = Math.abs(targetX - x);
-
-        if (remaining >= 2 && (downMoves < requiredDips || rng.next() < dipChance)) {
-          const nx1 = x + dir;
-          const nx2 = x + dir * 2;
-          add(x, y + 1);
-          add(nx1, y + 1);
-          add(nx1, y);
-          add(nx2, y);
-          x = nx2;
-          downMoves++;
-        } else {
-          x += dir;
-          add(x, y);
-        }
-      }
-
-      if (segmentDir !== 0) {
-        if (lastHorizDir !== 0 && segmentDir !== lastHorizDir) forcedReversalsDone++;
-        lastHorizDir = segmentDir;
-      }
-      add(x, y + 1);
-      y += 2;
-      add(x, y);
-    } else {
-      while (x !== targetX) {
-        x += targetX > x ? 1 : -1;
-        add(x, y);
-      }
-
-      if (segmentDir !== 0) {
-        if (lastHorizDir !== 0 && segmentDir !== lastHorizDir) forcedReversalsDone++;
-        lastHorizDir = segmentDir;
-      }
-      y += 1;
-      add(x, y);
-    }
-  }
-
-  while (x !== GRID_W - 1) {
-    x += GRID_W - 1 > x ? 1 : -1;
-    add(x, y);
-  }
-
-  return { idx, yBase, free, path, freeCount: free.size };
-}
-
-// ---------- UI (refactored into components) ----------
-class UIRoot {
-  constructor(scene) {
-    this.scene = scene;
-    this.lastRun = null;
-
-    this.screenFx = new ScreenTreatment(scene);
-    this.hud = new HudBar(scene);
-    this.minimap = new MiniMap(scene);
-    this.toastQueue = new ToastQueue(scene);
-    this.banner = new Banner(scene);
-    this.particles = new ParticleSystem(scene);
-    this.callouts = new CalloutLayer(scene);
-    this.overlay = new Overlay(scene);
-
-    this.setMode(STATE_MENU, "", {});
-  }
-
-  setLastRun(stats) {
-    this.lastRun = stats || null;
-    this.overlay.setLastRun(this.lastRun);
-  }
-
-  setMode(state, msg, ctx) {
-    this.hud.setVisible(state === STATE_PLAY);
-    this.minimap.setVisible(state === STATE_PLAY);
-    this.overlay.setMode(state, msg || "", ctx || {});
-  }
-
-  toast(text, type) {
-    this.toastQueue.push(text, type || "info");
-  }
-
-  onExpand(snake) {
-    // Expansion ceremony: banner + particles + toast
-    const level = snake && snake.world ? snake.world.revealed : 1;
-    this.banner.show(`LEVEL ${level}`, "accent", 0.85);
-    this.toastQueue.push(`LEVEL ${level}`, "accent");
-    this.particles.queueBurst(snake.headX, snake.headY, "accent");
-  }
-
-  onRespawn(snake) {
-    // Respawn ceremony: distinct from death
-    const reason = snake.lastRespawnReason || "RESPAWN";
-    this.toastQueue.push(`RESPAWNED (${reason})  LIVES ${snake.lives}`, "danger");
-    this.banner.show("RESPAWN", "danger", 0.65);
-    this.callouts.spawn(snake.headX, snake.headY, reason);
-    this.particles.queueBurst(snake.headX, snake.headY, "danger");
-  }
-
-  update(state, snake, world, bestChunk, showPath, dt) {
-    // Screen FX is always on (arcade treatment)
-    this.screenFx.update(state, snake, world, dt);
-
-    // HUD + minimap only meaningful in play
-    this.hud.update(state, snake, world, bestChunk, showPath, dt);
-    this.minimap.update(state, snake, world, dt);
-
-    // World-anchored layers need world camera info (set during world.draw)
-    this.particles.update(state, snake, world, dt);
-    this.callouts.update(state, snake, world, dt);
-
-    // Foreground layers
-    this.toastQueue.update(state, dt);
-    this.banner.update(state, dt);
-
-    // Menu / Dead overlays
-    this.overlay.update(state, snake, world, bestChunk, dt);
-  }
-}
-
-class ScreenTreatment {
-  constructor(scene) {
-    this.scene = scene;
-
-    this.scanImg = null;
-    this.vignetteImg = null;
-    this.border = scene.add.graphics().setDepth(6);
-
-    this.ensureTextures();
-    this.createImages();
-  }
-
-  ensureTextures() {
-    const scanKey = "__hs_scanlines";
-    const vigKey = "__hs_vignette";
-
-    if (!this.scene.textures.exists(scanKey)) {
-      const tmp = this.scene.make.graphics({ x: 0, y: 0, add: false });
-      const w = SCREEN_W;
-      const h = PLAY_H;
-
-      // transparent background by default
-      for (let y = 0; y < h; y += 3) {
-        tmp.fillStyle(0xffffff, 0.06);
-        tmp.fillRect(0, y, w, 1);
-      }
-
-      tmp.generateTexture(scanKey, w, h);
-      tmp.destroy();
-    }
-
-    if (!this.scene.textures.exists(vigKey)) {
-      const tmp = this.scene.make.graphics({ x: 0, y: 0, add: false });
-      const w = SCREEN_W;
-      const h = PLAY_H;
-
-      // edge darkening (cheap vignette)
-      const steps = 10;
-      const pad = 70;
-      for (let i = 0; i < steps; i++) {
-        const t = (i + 1) / steps;
-        const a = THEME.vignetteAlpha * t * 0.18;
-
-        // top
-        tmp.fillStyle(0x000000, a);
-        tmp.fillRect(0, i * (pad / steps), w, pad / steps);
-
-        // bottom
-        tmp.fillStyle(0x000000, a);
-        tmp.fillRect(0, h - (i + 1) * (pad / steps), w, pad / steps);
-
-        // left
-        tmp.fillStyle(0x000000, a);
-        tmp.fillRect(i * (pad / steps), 0, pad / steps, h);
-
-        // right
-        tmp.fillStyle(0x000000, a);
-        tmp.fillRect(w - (i + 1) * (pad / steps), 0, pad / steps, h);
-      }
-
-      tmp.generateTexture(vigKey, w, h);
-      tmp.destroy();
-    }
-  }
-
-  createImages() {
-    const scanKey = "__hs_scanlines";
-    const vigKey = "__hs_vignette";
-
-    this.scanImg = this.scene.add.image(0, PLAY_TOP, scanKey).setOrigin(0).setDepth(6);
-    this.scanImg.setAlpha(THEME.scanlinesAlpha);
-
-    this.vignetteImg = this.scene.add.image(0, PLAY_TOP, vigKey).setOrigin(0).setDepth(6);
-    this.vignetteImg.setAlpha(1);
-  }
-
-  update(state, snake, world, dt) {
-    // Border around play area (arcade bezel)
-    this.border.clear();
-
-    const pulse = 0.5 + 0.5 * Math.sin(this.scene.time.now * 0.004);
-    const waiting = snake && snake.waitingForMove;
-    const c = waiting ? THEME.warn : THEME.accent;
-    const a = waiting ? 0.55 + 0.35 * pulse : 0.28;
-
-    const frameTop = PLAY_TOP - 2;
-    const frameBottom = PLAY_BOTTOM + 2;
-
-    this.border.lineStyle(2, c, a);
-    this.border.strokeRect(8, frameTop, SCREEN_W - 16, frameBottom - frameTop);
-
-    // Little corner ticks for arcade feel
-    this.border.lineStyle(2, c, a * 0.9);
-    const L = 18;
-    const x0 = 8,
-      y0 = frameTop,
-      x1 = SCREEN_W - 8,
-      y1 = frameBottom;
-    this.border.beginPath();
-    // top-left
-    this.border.moveTo(x0, y0 + L);
-    this.border.lineTo(x0, y0);
-    this.border.lineTo(x0 + L, y0);
-    // top-right
-    this.border.moveTo(x1 - L, y0);
-    this.border.lineTo(x1, y0);
-    this.border.lineTo(x1, y0 + L);
-    // bottom-left
-    this.border.moveTo(x0, y1 - L);
-    this.border.lineTo(x0, y1);
-    this.border.lineTo(x0 + L, y1);
-    // bottom-right
-    this.border.moveTo(x1 - L, y1);
-    this.border.lineTo(x1, y1);
-    this.border.lineTo(x1, y1 - L);
-    this.border.strokePath();
-  }
-}
-
-class HudBar {
-  constructor(scene) {
-    this.scene = scene;
-
-    this.gfx = scene.add.graphics().setDepth(10);
-    this.textA = initPixelText(scene.add.text(0, 0, "", this.styleSmall()).setDepth(11));
-    this.textB = initPixelText(scene.add.text(0, 0, "", this.styleSmall()).setDepth(11));
-    this.textC = initPixelText(scene.add.text(0, 0, "", this.styleSmall()).setDepth(11));
-
-    this.bigTime = initPixelText(scene.add.text(0, 0, "", this.styleBig()).setDepth(11));
-    this.hintChip = initPixelText(scene.add.text(0, 0, "", this.styleChip()).setDepth(12), 1);
-
-    this.visible = true;
-    this.setVisible(false);
-  }
-
-  styleSmall() {
-    return {
-      fontFamily: FONT_PIXEL,
-      fontSize: "12px",
-      color: THEME.text,
-    };
-  }
-
-  styleBig() {
-    return {
-      fontFamily: FONT_PIXEL,
-      fontSize: "17px",
-      color: THEME.text,
-      fontStyle: "bold",
-    };
-  }
-
-  styleChip() {
-    return {
-      fontFamily: FONT_PIXEL,
-      fontSize: "10px",
-      color: "#0B1220",
-      fontStyle: "bold",
-    };
-  }
-
-  setVisible(v) {
-    this.visible = !!v;
-    this.gfx.setVisible(this.visible);
-    this.textA.setVisible(this.visible);
-    this.textB.setVisible(this.visible);
-    this.textC.setVisible(this.visible);
-    this.bigTime.setVisible(this.visible);
-    this.hintChip.setVisible(this.visible);
-  }
-
-  update(state, snake, world, bestChunk, showPath, dt) {
-    if (!this.visible) return;
-    if (!snake || !world) return;
-
-    const x = 10;
-    const y = 10;
-    const w = SCREEN_W - 20;
-    const h = UI_H - 20;
-
-    const segW = Math.floor(w / 3);
-    const segA = { x: x, y: y, w: segW, h };
-    const segB = { x: x + segW, y: y, w: segW, h };
-    const segC = { x: x + segW * 2, y: y, w: w - segW * 2, h };
-
-    // draw panel
-    this.gfx.clear();
-    this.gfx.fillStyle(THEME.hudBg, 0.98);
-    this.gfx.fillRoundedRect(x, y, w, h, 10);
-    this.gfx.lineStyle(2, THEME.hudStroke, 0.55);
-    this.gfx.strokeRoundedRect(x, y, w, h, 10);
-
-    // separators
-    this.gfx.lineStyle(1, THEME.hudStroke, 0.25);
-    this.gfx.beginPath();
-    this.gfx.moveTo(segB.x, y + 8);
-    this.gfx.lineTo(segB.x, y + h - 8);
-    this.gfx.moveTo(segC.x, y + 8);
-    this.gfx.lineTo(segC.x, y + h - 8);
-    this.gfx.strokePath();
-
-    // level (big)
-    const level = snake.chunkLevel();
-    this.bigTime.setText(`LEVEL ${level}`);
-    this.bigTime.setPosition(segA.x + 14, segA.y + 6);
-
-    // left subline
-    const spd = Math.round(1000 / snake.moveIntervalMs());
-    this.textA.setText(`BEST ${bestChunk}  LIVES ${snake.lives}  SPD ${spd}`);
-    this.textA.setPosition(segA.x + 14, segA.y + 28);
-
-    // center
-    const revealed = world.revealedHeight;
-    this.textB.setText(`HEIGHT ${snake.maxY}\nPATH ${showPath ? "ON" : "OFF"}`);
-    this.textB.setPosition(segB.x + 14, segB.y + 8);
-
-    // right
-    const cellsVisited = snake.len;
-    const cellsTotal = world.totalFree;
-    this.textC.setText(`SCORE ${snake.currentScore()}\nVIS ${cellsVisited}/${cellsTotal}`);
-    this.textC.setPosition(segC.x + 14, segC.y + 8);
-
-    // hint chip when waiting for move
-    if (snake.waitingForMove) {
-      const pulse = 0.5 + 0.5 * Math.sin(this.scene.time.now * 0.008);
-      const chipText = snake.waitingReason || "CHOOSE MOVE";
-      this.hintChip.setText(chipText);
-
-      const cx = segC.x + segC.w - 14;
-      const cy = segC.y + segC.h - 10;
-
-      // draw chip background
-      const tw = this.hintChip.width + 18;
-      const th = 20;
-      const rx = cx - tw;
-      const ry = cy - th;
-
-      this.gfx.fillStyle(THEME.warn, 0.85);
-      this.gfx.fillRoundedRect(rx, ry, tw, th, 8);
-      this.gfx.lineStyle(2, THEME.warn, 0.55 + 0.35 * pulse);
-      this.gfx.strokeRoundedRect(rx, ry, tw, th, 8);
-
-      this.hintChip.setPosition(rx + 9, ry + 2);
-      this.hintChip.setVisible(true);
-    } else {
-      this.hintChip.setVisible(false);
-    }
-  }
-}
-
-class MiniMap {
-  constructor(scene) {
-    this.scene = scene;
-    this.gfx = scene.add.graphics().setDepth(10);
-    this.visible = true;
-    this.setVisible(false);
-  }
-
-  setVisible(v) {
-    this.visible = !!v;
-    this.gfx.setVisible(this.visible);
-  }
-
-  update(state, snake, world, dt) {
-    if (!this.visible) return;
-    if (!snake || !world) return;
-
-    const x = SCREEN_W - 22;
-    const y = PLAY_TOP + 16;
-    const h = PLAY_BOTTOM - PLAY_TOP - 32;
-    const w = 10;
-
-    const revealed = Math.max(1, world.revealedHeight);
-    const headY = clamp(snake.headY, 0, revealed);
-    const maxY = clamp(snake.maxY, 0, revealed);
-
-    const headT = headY / revealed;
-    const maxT = maxY / revealed;
-
-    const headPy = y + h - headT * h;
-    const maxPy = y + h - maxT * h;
-
-    this.gfx.clear();
-
-    // background
-    this.gfx.fillStyle(0x000000, 0.22);
-    this.gfx.fillRoundedRect(x - 4, y - 6, w + 8, h + 12, 8);
-
-    // bar
-    this.gfx.fillStyle(0xffffff, 0.10);
-    this.gfx.fillRoundedRect(x, y, w, h, 5);
-
-    // chunk ticks (every CHUNK_H rows)
-    this.gfx.lineStyle(1, THEME.accent, 0.12);
-    const chunks = Math.max(1, world.revealed);
-    for (let c = 1; c < chunks; c++) {
-      const ty = y + h - (c * CHUNK_H / revealed) * h;
-      this.gfx.beginPath();
-      this.gfx.moveTo(x - 2, ty);
-      this.gfx.lineTo(x + w + 2, ty);
-      this.gfx.strokePath();
-    }
-
-    // markers
-    this.gfx.fillStyle(THEME.accent, 0.9);
-    this.gfx.fillRect(x - 2, headPy - 2, w + 4, 4);
-
-    this.gfx.fillStyle(THEME.success, 0.9);
-    this.gfx.fillRect(x - 2, maxPy - 2, w + 4, 4);
-  }
-}
-
-class ToastQueue {
-  constructor(scene) {
-    this.scene = scene;
-    this.gfx = scene.add.graphics().setDepth(14);
-    this.text = scene
-      .add.text(0, 0, "", {
-        fontFamily: FONT_PIXEL,
-        fontSize: "13px",
-        color: THEME.text,
-        fontStyle: "bold",
-      })
-      .setDepth(15)
-      .setOrigin(0.5);
-    initPixelText(this.text, 2);
-
-    this.text.setShadow(1, 1, "#000000", 2, true, true);
-
-    this.queue = [];
-    this.active = null;
-  }
-
-  push(msg, type) {
-    this.queue.push({ msg: String(msg || ""), type: type || "info" });
-  }
-
-  colorFor(type) {
-    if (type === "danger") return THEME.danger;
-    if (type === "accent") return THEME.accent;
-    if (type === "success") return THEME.success;
-    return THEME.accent;
-  }
-
-  update(state, dt) {
-    // only show toasts during play (keeps overlays clean)
-    if (state !== STATE_PLAY) {
-      this.gfx.clear();
-      this.text.setText("");
-      this.active = null;
-      this.queue.length = 0;
-      return;
-    }
-
-    if (!this.active && this.queue.length) {
-      const next = this.queue.shift();
-      this.active = {
-        msg: next.msg,
-        type: next.type,
-        t: 0,
-        dur: 1100,
-      };
-      this.text.setText(next.msg);
-    }
-
-    if (!this.active) {
-      this.gfx.clear();
-      this.text.setText("");
-      return;
-    }
-
-    this.active.t += dt;
-    const t = this.active.t;
-    const dur = this.active.dur;
-
-    const fadeIn = 140;
-    const fadeOut = 220;
-    let a = 1;
-    if (t < fadeIn) a = t / fadeIn;
-    else if (t > dur - fadeOut) a = Math.max(0, (dur - t) / fadeOut);
-
-    const y = PLAY_TOP + 18 + (1 - a) * -10;
-    const x = SCREEN_W / 2;
-
-    this.text.setPosition(x, y);
-    this.text.setAlpha(a);
-
-    const padX = 14;
-    const padY = 8;
-    const bw = this.text.width + padX * 2;
-    const bh = 28;
-
-    this.gfx.clear();
-    const c = this.colorFor(this.active.type);
-
-    this.gfx.fillStyle(0x000000, 0.35 * a);
-    this.gfx.fillRoundedRect(x - bw / 2 + 2, y - bh / 2 + 2, bw, bh, 10);
-
-    this.gfx.fillStyle(THEME.panelBg, 0.92 * a);
-    this.gfx.fillRoundedRect(x - bw / 2, y - bh / 2, bw, bh, 10);
-
-    this.gfx.lineStyle(2, c, 0.75 * a);
-    this.gfx.strokeRoundedRect(x - bw / 2, y - bh / 2, bw, bh, 10);
-
-    if (t >= dur) {
-      this.active = null;
-      this.gfx.clear();
-      this.text.setText("");
-    }
-  }
-}
-
-class Banner {
-  constructor(scene) {
-    this.scene = scene;
-
-    this.gfx = scene.add.graphics().setDepth(16);
-    this.text = scene
-      .add.text(SCREEN_W / 2, PLAY_TOP + 120, "", {
-        fontFamily: FONT_PIXEL,
-        fontSize: "24px",
-        color: "#FFFFFF",
-        fontStyle: "bold",
-      })
-      .setDepth(17)
-      .setOrigin(0.5);
-    initPixelText(this.text, 2);
-
-    this.text.setShadow(2, 2, "#000000", 4, true, true);
-
-    this.active = false;
-    this.t = 0;
-    this.dur = 850;
-    this.kind = "accent";
-  }
-
-  show(msg, kind, durSec) {
-    this.active = true;
-    this.t = 0;
-    this.kind = kind || "accent";
-    this.dur = Math.max(450, Math.floor((durSec || 0.85) * 1000));
-    this.text.setText(String(msg || ""));
-  }
-
-  colorFor(kind) {
-    if (kind === "danger") return THEME.danger;
-    if (kind === "success") return THEME.success;
-    return THEME.accent;
-  }
-
-  update(state, dt) {
-    if (state !== STATE_PLAY) {
-      this.active = false;
-      this.gfx.clear();
-      this.text.setText("");
-      return;
-    }
-    if (!this.active) return;
-
-    this.t += dt;
-
-    const t = this.t;
-    const dur = this.dur;
-
-    // scale pop-in + fade-out
-    const inMs = 180;
-    const outMs = 260;
-
-    let a = 1;
-    let s = 1;
-
-    if (t < inMs) {
-      const p = t / inMs;
-      s = 0.85 + 0.15 * easeOutCubic(p);
-      a = p;
-    } else if (t > dur - outMs) {
-      const p = (t - (dur - outMs)) / outMs;
-      a = 1 - p;
-      s = 1 + 0.02 * p;
-    }
-
-    const y = PLAY_TOP + 120;
-    this.text.setPosition(SCREEN_W / 2, y);
-    this.text.setAlpha(a);
-    this.text.setScale(s);
-
-    const c = this.colorFor(this.kind);
-
-    const bw = Math.min(680, this.text.width + 80);
-    const bh = 84;
-
-    this.gfx.clear();
-    this.gfx.fillStyle(0x000000, 0.32 * a);
-    this.gfx.fillRoundedRect(SCREEN_W / 2 - bw / 2 + 3, y - bh / 2 + 3, bw, bh, 14);
-
-    this.gfx.fillStyle(THEME.panelBg, 0.86 * a);
-    this.gfx.fillRoundedRect(SCREEN_W / 2 - bw / 2, y - bh / 2, bw, bh, 14);
-
-    this.gfx.lineStyle(3, c, 0.85 * a);
-    this.gfx.strokeRoundedRect(SCREEN_W / 2 - bw / 2, y - bh / 2, bw, bh, 14);
-
-    // top neon strip
-    this.gfx.fillStyle(c, 0.20 * a);
-    this.gfx.fillRect(SCREEN_W / 2 - bw / 2, y - bh / 2, bw, 6);
-
-    if (t >= dur) {
-      this.active = false;
-      this.gfx.clear();
-      this.text.setText("");
-    }
-  }
-}
-
-class CalloutLayer {
-  constructor(scene) {
-    this.scene = scene;
-    this.items = [];
-  }
-
-  spawn(gridX, gridY, msg) {
-    const t = this.scene.add
-      .text(0, 0, String(msg || ""), {
-        fontFamily: FONT_PIXEL,
-        fontSize: "12px",
-        color: "#FFFFFF",
-        fontStyle: "bold",
-      })
-      .setDepth(13)
-      .setOrigin(0.5);
-    initPixelText(t, 1);
-
-    t.setShadow(1, 1, "#000000", 3, true, true);
-
-    this.items.push({
-      text: t,
-      gx: gridX,
-      gy: gridY,
-      t: 0,
-      dur: 900,
-    });
-  }
-
-  update(state, snake, world, dt) {
-    if (state !== STATE_PLAY || !world) {
-      // clean up
-      for (const it of this.items) it.text.destroy();
-      this.items.length = 0;
-      return;
-    }
-
-    const cam = world.lastCamBottom || 0;
-
-    for (let i = this.items.length - 1; i >= 0; i--) {
-      const it = this.items[i];
-      it.t += dt;
-
-      const p = it.t / it.dur;
-      const a = p < 0.15 ? p / 0.15 : p > 0.85 ? (1 - p) / 0.15 : 1;
-
-      const r = toScreen(it.gx, it.gy, cam);
-      const y = r.y - 18 - 18 * p;
-      const x = r.x + TILE * 0.5;
-
-      it.text.setPosition(x, y);
-      it.text.setAlpha(clamp(a, 0, 1));
-
-      if (it.t >= it.dur) {
-        it.text.destroy();
-        this.items.splice(i, 1);
-      }
-    }
-  }
-}
-
-class ParticleSystem {
-  constructor(scene) {
-    this.scene = scene;
-    this.gfx = scene.add.graphics().setDepth(12);
-
-    this.pendingBursts = [];
-    this.parts = [];
-  }
-
-  queueBurst(gx, gy, kind) {
-    this.pendingBursts.push({ gx, gy, kind: kind || "accent" });
-  }
-
-  colorFor(kind) {
-    if (kind === "danger") return THEME.danger;
-    if (kind === "success") return THEME.success;
-    return THEME.accent;
-  }
-
-  flushBursts(world) {
-    if (!world || this.pendingBursts.length === 0) return;
-
-    const cam = world.lastCamBottom || 0;
-
-    while (this.pendingBursts.length) {
-      const b = this.pendingBursts.shift();
-      const r = toScreen(b.gx, b.gy, cam);
-      const cx = r.x + TILE * 0.5;
-      const cy = r.y + TILE * 0.5;
-
-      const col = this.colorFor(b.kind);
-
-      const n = 22;
-      for (let i = 0; i < n; i++) {
-        const a = Math.random() * Math.PI * 2;
-        const sp = 40 + Math.random() * 120;
-        this.parts.push({
-          x: cx,
-          y: cy,
-          vx: Math.cos(a) * sp,
-          vy: Math.sin(a) * sp - 40,
-          life: 0,
-          dur: 420 + Math.random() * 220,
-          size: 2 + Math.random() * 5,
-          col,
-        });
-      }
-    }
-  }
-
-  update(state, snake, world, dt) {
-    if (state !== STATE_PLAY) {
-      this.pendingBursts.length = 0;
-      this.parts.length = 0;
-      this.gfx.clear();
-      return;
-    }
-
-    this.flushBursts(world);
-
-    this.gfx.clear();
-    if (this.parts.length === 0) return;
-
-    for (let i = this.parts.length - 1; i >= 0; i--) {
-      const p = this.parts[i];
-      p.life += dt;
-      const t = p.life / p.dur;
-
-      // integrate
-      const s = dt / 1000;
-      p.vy += 260 * s; // gravity
-      p.x += p.vx * s;
-      p.y += p.vy * s;
-
-      const a = t < 0.2 ? t / 0.2 : 1 - t;
-      const alpha = clamp(a, 0, 1) * 0.8;
-
-      this.gfx.fillStyle(p.col, alpha);
-      this.gfx.fillRect(p.x - p.size * 0.5, p.y - p.size * 0.5, p.size, p.size);
-
-      if (p.life >= p.dur) this.parts.splice(i, 1);
-    }
-  }
-}
-
-class Overlay {
-  constructor(scene) {
-    this.scene = scene;
-
-    this.backdrop = scene.add.graphics().setDepth(20);
-    this.panel = scene.add.graphics().setDepth(21);
-
-    this.title = scene
-      .add.text(SCREEN_W / 2, SCREEN_H / 2 - 90, "", {
-        fontFamily: FONT_PIXEL,
-        fontSize: "36px",
-        color: "#FFFFFF",
-        align: "center",
-        fontStyle: "bold",
-      })
-      .setOrigin(0.5)
-      .setDepth(22);
-    initPixelText(this.title, 2);
-
-    this.sub = scene
-      .add.text(SCREEN_W / 2, SCREEN_H / 2 - 10, "", {
-        fontFamily: FONT_PIXEL,
-        fontSize: "13px",
-        color: THEME.text,
-        align: "center",
-      })
-      .setOrigin(0.5)
-      .setDepth(22);
-    initPixelText(this.sub, 2);
-
-    this.help = scene
-      .add.text(SCREEN_W / 2, SCREEN_H / 2 + 90, "", {
-        fontFamily: FONT_PIXEL,
-        fontSize: "12px",
-        color: THEME.muted,
-        align: "center",
-      })
-      .setOrigin(0.5)
-      .setDepth(22);
-    initPixelText(this.help, 2);
-
-    this.stats = scene
-      .add.text(SCREEN_W / 2, SCREEN_H / 2 + 30, "", {
-        fontFamily: FONT_PIXEL,
-        fontSize: "12px",
-        color: THEME.text,
-        align: "center",
-      })
-      .setOrigin(0.5)
-      .setDepth(22);
-    initPixelText(this.stats, 2);
-
-    this.board = scene
-      .add.text(SCREEN_W / 2, SCREEN_H / 2 + 150, "", {
-        fontFamily: FONT_PIXEL,
-        fontSize: "11px",
-        color: "#CFF1FF",
-        align: "center",
-      })
-      .setOrigin(0.5)
-      .setDepth(22);
-    initPixelText(this.board, 2);
-
-    this.title.setShadow(2, 2, "#000000", 4, true, true);
-    this.sub.setShadow(1, 1, "#000000", 2, true, true);
-    this.help.setShadow(1, 1, "#000000", 2, true, true);
-    this.stats.setShadow(1, 1, "#000000", 2, true, true);
-    this.board.setShadow(1, 1, "#000000", 2, true, true);
-
-    this.mode = STATE_MENU;
-    this.msg = "";
-    this.ctx = { bestChunk: 1 };
-    this.lastRun = null;
-
-    this.modeSince = scene.time.now;
-    this.setMode(STATE_MENU, "", { bestChunk: 1, leaderboard: [], nameEntry: null });
-  }
-
-  setLastRun(stats) {
-    this.lastRun = stats || null;
-  }
-
-  setMode(state, msg, ctx) {
-    if (state !== this.mode) this.modeSince = this.scene.time.now;
-    this.mode = state;
-    this.msg = msg || "";
-    this.ctx = ctx || { bestChunk: 1 };
-
-    const show = state !== STATE_PLAY;
-
-    this.backdrop.setVisible(show);
-    this.panel.setVisible(show);
-    this.title.setVisible(show);
-    this.sub.setVisible(show);
-    this.help.setVisible(show);
-    this.stats.setVisible(show);
-    this.board.setVisible(show);
-
-    if (!show) return;
-
-    if (state === STATE_MENU) {
-      this.title.setText("CAVE SNAKE");
-      this.sub.setText(
-        "SLITHER FAST. CLAIM EVERY TILE."
-      );
-      this.help.setText(
-        "WASD / ARROWS TO MOVE. FIRST MOVE STARTS.\n" +
-        "I = NEW MAP   O = TOGGLE PATH"
-      );
-      const notice = this.ctx.highScoreNotice ? `\n${this.ctx.highScoreNotice}` : "";
-      this.stats.setText(`BEST LVL ${this.ctx.bestChunk || 1}   PRESS ANY ARROW TO START${notice}`);
-      this.board.setText(this.formatBoard(this.ctx.leaderboard));
-      this.title.setColor("#FFFFFF");
-      this.sub.setColor("#EAF4FF");
-      this.help.setColor("#F4FBFF");
-      this.stats.setColor(this.ctx.highScoreNotice ? "#FFF06A" : "#CFF1FF");
-      this.board.setColor("#CFF1FF");
-    } else if (state === STATE_ENTRY) {
-      const entry = this.ctx.nameEntry || { score: 0, level: 1, chars: ["A", "A", "A"], cursor: 0 };
-      const blink = Math.floor(this.scene.time.now / 220) % 2 === 0;
-      this.title.setText("NEW HIGH SCORE");
-      this.sub.setText(`SCORE ${entry.score}   LEVEL ${entry.level}`);
-      this.help.setText("UP/DOWN LETTER   LEFT/RIGHT SLOT   I OR ENTER SAVE");
-      this.stats.setText(this.formatEntryName(entry, blink));
-      this.board.setText(this.formatBoard(this.ctx.leaderboard));
-      this.title.setColor("#FFFFFF");
-      this.sub.setColor("#EAF4FF");
-      this.help.setColor("#F4FBFF");
-      this.stats.setColor("#FFF06A");
-      this.board.setColor("#CFF1FF");
-    } else {
-      this.title.setText("GAME OVER");
-      const reason = this.msg ? this.msg : "YOU LOST";
-      this.sub.setText(reason);
-
-      if (this.lastRun) {
-        const s = this.lastRun;
-        this.stats.setText(
-          `SCORE: ${s.score}   LVL: ${s.level}   BEST: ${s.bestLevel}\n` +
-          `HEIGHT: ${s.maxY}   REVEALED: ${s.revealed}`
-        );
-      } else {
-        this.stats.setText("");
-      }
-
-      this.help.setText("Press any key to continue.\nThen MOVE to start.");
-      this.board.setText(this.formatBoard(this.ctx.leaderboard));
-      this.title.setColor("#FFFFFF");
-      this.sub.setColor(THEME.text);
-      this.help.setColor(THEME.text);
-      this.stats.setColor(THEME.text);
-      this.board.setColor("#C7D8EA");
-    }
-  }
-
-  formatBoard(entries) {
-    const list = Array.isArray(entries) ? entries.slice(0, 8) : [];
-    if (list.length === 0) return "LEADERBOARD\nNO SCORES YET";
-
-    const rows = ["LEADERBOARD"];
     for (let i = 0; i < list.length; i++) {
-      const e = list[i];
-      const rank = String(i + 1).padStart(2, " ");
-      const nm = String((e && e.name) || "AAA").toUpperCase().padEnd(3, " ").slice(0, 3);
-      const lvl = Math.max(1, ((e && e.level) | 0));
-      const score = Math.max(0, ((e && e.score) | 0));
-      rows.push(`${rank}. ${nm}   ${score}  (LVL ${lvl})`);
+      const it = list[i];
+      const dist = it.dist;
+      const size = it.size;
+      const x0 = it.x0;
+
+      const hh = clamp((size * 1.22) | 0, 6, (RH * 1.8) | 0);
+      const yy = (horizon - (hh >> 1)) | 0;
+
+      const shade = floorShade(dist);
+      const vis = 0.25 + 0.75 * (shade / (SH - 1));
+      g.globalAlpha = clamp(vis, 0.2, 1);
+
+      const baseSpr = (it.e && it.e.spr) ? it.e.spr : enemyImg;
+      const hurtSpr = (it.e && it.e.sprHurt) ? it.e.sprHurt : enemyImgHurt;
+      const spr = (it.e && it.e.hurt > 0) ? hurtSpr : baseSpr;
+      const sw = spr.width || 1;
+      const sh = spr.height || 1;
+
+      for (let xx = 0; xx < size; xx++) {
+        const sx = x0 + xx;
+        if (sx < 0 || sx >= RW) continue;
+        if (dist >= zbuf[sx]) continue;
+
+        const tx = clamp((xx * sw / size) | 0, 0, sw - 1);
+        g.drawImage(spr, tx, 0, 1, sh, sx, yy, 1, hh);
+      }
     }
-    return rows.join("\n");
+    g.globalAlpha = 1;
+    g.imageSmoothingEnabled = false;
   }
 
-  formatEntryName(entry, blink) {
-    const chars = (entry && Array.isArray(entry.chars) ? entry.chars : ["A", "A", "A"]).slice(0, 3);
-    while (chars.length < 3) chars.push("A");
-    const cursor = Math.max(0, Math.min(2, (entry && entry.cursor) | 0));
+  function drawBossCastFX(horizon) {
+    if (!boss.alive || boss.cast <= 0) return;
 
-    const out = [];
+    const dx = boss.x - player.x, dy = boss.y - player.y;
+    const dist = hypot(dx, dy);
+    if (dist < 0.1) return;
+
+    const ang = normAng(Math.atan2(dy, dx) - player.a);
+    if (Math.abs(ang) > FOV * 0.75) return;
+
+    const sx = (RW / 2 + Math.tan(ang) * PROJ) | 0;
+    if (sx < 0 || sx >= RW || dist >= zbuf[sx]) return;
+
+    const charge = 1 - clamp(boss.cast / FIRE_TELEGRAPH, 0, 1);
+    const rad = clamp(((PROJ / dist) * (1.1 + 0.8 * charge)) | 0, 7, 42);
+    const cy = (horizon - ((PROJ / dist) * 0.45)) | 0;
+
+    g.globalCompositeOperation = "lighter";
     for (let i = 0; i < 3; i++) {
-      const c = String(chars[i] || "A").toUpperCase().slice(0, 1);
-      out.push(i === cursor && blink ? `[${c}]` : ` ${c} `);
+      const r = rad + i * 5;
+      const a = (0.16 - i * 0.04) * (0.35 + 0.65 * charge);
+      g.fillStyle = `rgba(255,80,60,${a})`;
+      g.fillRect((sx - r) | 0, (cy - r) | 0, (r * 2) | 0, (r * 2) | 0);
     }
-    return out.join(" ");
+    g.globalCompositeOperation = "source-over";
   }
 
-  menuSnakePerimeter(x, y, w, h, inset) {
-    const left = x + inset;
-    const right = x + w - inset;
-    const top = y + inset;
-    const bottom = y + h - inset;
-    return (right - left) * 2 + (bottom - top) * 2;
-  }
+  function drawFireballs(horizon) {
+    if (!fireballs.length) return;
 
-  menuSnakePoint(x, y, w, h, inset, dist) {
-    const left = x + inset;
-    const right = x + w - inset;
-    const top = y + inset;
-    const bottom = y + h - inset;
-    const topLen = right - left;
-    const rightLen = bottom - top;
-    const bottomLen = topLen;
-    const leftLen = rightLen;
-    const perimeter = topLen + rightLen + bottomLen + leftLen;
+    const order = fireballs.map((f, i) => {
+      const dx = f.x - player.x, dy = f.y - player.y;
+      return { i, d: dx * dx + dy * dy };
+    }).sort((a, b) => b.d - a.d);
 
-    let d = ((dist % perimeter) + perimeter) % perimeter;
-    if (d < topLen) return { x: left + d, y: top };
-    d -= topLen;
-    if (d < rightLen) return { x: right, y: top + d };
-    d -= rightLen;
-    if (d < bottomLen) return { x: right - d, y: bottom };
-    d -= bottomLen;
-    return { x: left, y: bottom - d };
-  }
+    g.globalCompositeOperation = "lighter";
 
-  drawMenuSnake(x, y, w, h, pulse) {
-    const inset = 10;
-    const perimeter = this.menuSnakePerimeter(x, y, w, h, inset);
-    const headDist = (this.scene.time.now * 0.24) % perimeter;
-    const segments = 13;
-    const spacing = 11;
+    for (let k = 0; k < order.length; k++) {
+      const f = fireballs[order[k].i];
+      const dx = f.x - player.x, dy = f.y - player.y;
+      const dist = hypot(dx, dy);
+      if (dist < 0.15) continue;
 
-    for (let i = segments - 1; i >= 0; i--) {
-      const d = headDist - i * spacing;
-      const p = this.menuSnakePoint(x, y, w, h, inset, d);
-      const t = 1 - i / (segments - 1);
-      const isHead = i === 0;
-      const size = isHead ? 8 : 6;
-      const alpha = (isHead ? 0.9 : 0.25 + 0.55 * t) * (0.78 + 0.22 * pulse);
-      const color = isHead ? 0xfff06a : THEME.tileTrail;
+      const ang = normAng(Math.atan2(dy, dx) - player.a);
+      if (Math.abs(ang) > FOV * 0.80) continue;
 
-      this.panel.fillStyle(color, alpha);
-      this.panel.fillRect(
-        Math.round(p.x - size * 0.5),
-        Math.round(p.y - size * 0.5),
-        size,
-        size
-      );
+      const sx = (RW / 2 + Math.tan(ang) * PROJ) | 0;
+      const size = clamp(((PROJ / dist) | 0), 4, 22);
+      const x0 = (sx - (size >> 1)) | 0;
+      const cy = (horizon - (size * 0.18)) | 0;
+
+      f.sx = clamp(sx, 0, RW - 1);
+      f.sy = clamp(cy, 0, RH - 1);
+
+      const flick = 0.60 + 0.40 * Math.sin(f.life * 18 + k * 1.7);
+      const a0 = 0.18 + 0.18 * flick;
+      const a1 = 0.30 + 0.22 * flick;
+
+      const tx = f.x - f.vx * FIRE_TRAIL_LEN;
+      const ty = f.y - f.vy * FIRE_TRAIL_LEN;
+      const tang = normAng(Math.atan2(ty - player.y, tx - player.x) - player.a);
+      if (Math.abs(tang) < FOV * 0.85) {
+        const tsx = (RW / 2 + Math.tan(tang) * PROJ) | 0;
+        g.strokeStyle = `rgba(255,120,70,${0.14 + 0.18 * flick})`;
+        g.beginPath();
+        g.moveTo(tsx, cy);
+        g.lineTo(sx, cy);
+        g.stroke();
+      }
+
+      for (let xx = 0; xx < size; xx++) {
+        const pxX = x0 + xx;
+        if (pxX < 0 || pxX >= RW) continue;
+        if (dist >= zbuf[pxX]) continue;
+
+        const u = (xx / size) * 2 - 1;
+        const cut = 1 - u * u;
+        if (cut <= 0) continue;
+
+        const hh = (size * (0.50 + 0.50 * cut)) | 0;
+        const yy = (cy - (hh >> 1)) | 0;
+
+        g.fillStyle = `rgba(255,95,45,${a0})`;
+        g.fillRect(pxX, yy, 1, hh);
+
+        g.fillStyle = `rgba(255,220,120,${a1})`;
+        g.fillRect(pxX, yy + 1, 1, Math.max(1, hh - 2));
+      }
+
+      g.fillStyle = `rgba(255,255,255,${0.10 + 0.16 * flick})`;
+      g.fillRect((sx - 1) | 0, (cy - 1) | 0, 3, 3);
     }
+
+    g.globalCompositeOperation = "source-over";
   }
 
-  update(state, snake, world, bestChunk, dt) {
-    if (this.mode === STATE_PLAY) return;
+  function renderFloorCeil(horizon, a, torch) {
+    // Classic floor-casting style with left/right rays
+    const leftA = a - FOV * 0.5;
+    const rightA = a + FOV * 0.5;
 
-    this.backdrop.clear();
-    this.panel.clear();
+    const rayDirX0 = Math.cos(leftA), rayDirY0 = Math.sin(leftA);
+    const rayDirX1 = Math.cos(rightA), rayDirY1 = Math.sin(rightA);
 
-    if (this.mode === STATE_MENU) {
-      // centered title + leaderboard panel
-      const fadeT = clamp((this.scene.time.now - this.modeSince) / 300, 0, 1);
-      const a = 0.48 + 0.12 * fadeT;
+    const posZ = RH * 0.5;
 
-      this.backdrop.fillStyle(0x000000, a);
-      this.backdrop.fillRect(0, 0, SCREEN_W, SCREEN_H);
+    for (let y = 0; y < RH; y++) {
+      const p = (y > horizon) ? (y - horizon) : (horizon - y);
+      if (p < 0.001) {
+        // fill with fog-ish center line
+        const col = pack(FOG_R, FOG_G, FOG_B);
+        const off = y * RW;
+        for (let x = 0; x < RW; x++) px[off + x] = col;
+        continue;
+      }
 
-      // panel
-      const w = 700;
-      const h = 450;
-      const x = (SCREEN_W - w) / 2;
-      const y = (SCREEN_H - h) / 2 - 12;
+      const rowDist = posZ / p;
+      const shadeRow = floorShade(rowDist);
 
-      const pulse = 0.5 + 0.5 * Math.sin(this.scene.time.now * 0.004);
-      const borderA = 0.55 + 0.25 * pulse;
+      const texArr = (y > horizon) ? floorTex : ceilTex;
 
-      this.panel.fillStyle(THEME.panelBg, 0.97);
-      this.panel.fillRoundedRect(x, y, w, h, 12);
-      this.panel.lineStyle(3, THEME.panelStroke, Math.max(0.8, borderA));
-      this.panel.strokeRoundedRect(x, y, w, h, 12);
+      let fx = player.x + rowDist * rayDirX0;
+      let fy = player.y + rowDist * rayDirY0;
 
-      // neon strip
-      this.panel.fillStyle(THEME.panelStroke, 0.18);
-      this.panel.fillRect(x, y, w, 6);
-      this.drawMenuSnake(x, y, w, h, pulse);
+      const stepX = rowDist * (rayDirX1 - rayDirX0) / RW;
+      const stepY = rowDist * (rayDirY1 - rayDirY0) / RW;
 
-      // centered text layout
-      const wobble = Math.sin(this.scene.time.now * 0.006) * 2;
-      this.title.setPosition(SCREEN_W / 2, y + 56 + wobble).setFontSize(28);
-      this.sub.setPosition(SCREEN_W / 2, y + 118).setFontSize(14);
-      this.board.setPosition(SCREEN_W / 2, y + 244).setFontSize(11);
-      this.help.setPosition(SCREEN_W / 2, y + 376).setFontSize(11);
-      this.stats.setPosition(SCREEN_W / 2, y + 410).setFontSize(11);
-      this.stats.setVisible(true);
-      this.help.setVisible(true);
-      this.board.setVisible(true);
-    } else if (this.mode === STATE_ENTRY) {
-      const fadeT = clamp((this.scene.time.now - this.modeSince) / 220, 0, 1);
-      const a = 0.56 + 0.14 * fadeT;
-
-      this.backdrop.fillStyle(0x000000, a);
-      this.backdrop.fillRect(0, 0, SCREEN_W, SCREEN_H);
-
-      const w = 700;
-      const h = 450;
-      const x = (SCREEN_W - w) / 2;
-      const y = (SCREEN_H - h) / 2 - 12;
-
-      const pulse = 0.5 + 0.5 * Math.sin(this.scene.time.now * 0.006);
-      const borderA = 0.70 + 0.24 * pulse;
-
-      this.panel.fillStyle(THEME.panelBg, 0.96);
-      this.panel.fillRoundedRect(x, y, w, h, 12);
-      this.panel.lineStyle(3, THEME.warn, borderA);
-      this.panel.strokeRoundedRect(x, y, w, h, 12);
-      this.panel.fillStyle(THEME.warn, 0.18);
-      this.panel.fillRect(x, y, w, 6);
-
-      const entry = this.ctx.nameEntry || { level: 1, chars: ["A", "A", "A"], cursor: 0 };
-      const blink = Math.floor(this.scene.time.now / 220) % 2 === 0;
-      this.stats.setText(this.formatEntryName(entry, blink));
-
-      this.title.setPosition(SCREEN_W / 2, y + 56).setFontSize(26);
-      this.sub.setPosition(SCREEN_W / 2, y + 118).setFontSize(13);
-      this.stats.setPosition(SCREEN_W / 2, y + 188).setFontSize(24);
-      this.board.setPosition(SCREEN_W / 2, y + 300).setFontSize(11);
-      this.help.setPosition(SCREEN_W / 2, y + 418).setFontSize(10);
-      this.stats.setVisible(true);
-      this.help.setVisible(true);
-      this.board.setVisible(true);
-    } else if (this.mode === STATE_DEAD) {
-      // full overlay
-      this.backdrop.fillStyle(0x000000, 0.68);
-      this.backdrop.fillRect(0, 0, SCREEN_W, SCREEN_H);
-
-      const w = 660;
-      const h = 320;
-      const x = (SCREEN_W - w) / 2;
-      const y = (SCREEN_H - h) / 2 - 30;
-
-      const pulse = 0.5 + 0.5 * Math.sin(this.scene.time.now * 0.004);
-      const borderA = 0.70 + 0.25 * pulse;
-
-      this.panel.fillStyle(THEME.panelBg, 0.95);
-      this.panel.fillRoundedRect(x, y, w, h, 14);
-      this.panel.lineStyle(3, THEME.dangerStroke, borderA);
-      this.panel.strokeRoundedRect(x, y, w, h, 14);
-      this.panel.fillStyle(THEME.dangerStroke, 0.18);
-      this.panel.fillRect(x, y, w, 6);
-
-      this.title.setPosition(SCREEN_W / 2, y + 72).setFontSize(34);
-      this.sub.setPosition(SCREEN_W / 2, y + 132).setFontSize(13);
-      this.stats.setPosition(SCREEN_W / 2, y + 202).setFontSize(12);
-      this.help.setPosition(SCREEN_W / 2, y + 272).setFontSize(12);
-      this.stats.setVisible(true);
-      this.help.setVisible(true);
-      this.board.setVisible(false);
-    }
-  }
-}
-
-function drawArrowTri(gfx, x, y, dir, size, col, alpha) {
-  gfx.fillStyle(col, alpha);
-  gfx.beginPath();
-  if (dir > 0) {
-    gfx.moveTo(x - size * 0.6, y - size);
-    gfx.lineTo(x - size * 0.6, y + size);
-    gfx.lineTo(x + size, y);
-  } else {
-    gfx.moveTo(x + size * 0.6, y - size);
-    gfx.lineTo(x + size * 0.6, y + size);
-    gfx.lineTo(x - size, y);
-  }
-  gfx.closePath();
-  gfx.fillPath();
-}
-
-function easeOutCubic(t) {
-  const u = 1 - t;
-  return 1 - u * u * u;
-}
-
-// ---------- Audio FX ----------
-class FX {
-  constructor(scene) {
-    this.scene = scene;
-  }
-
-  toneAt(t, freq, dur, vol, type) {
-    try {
-      const ctx = this.scene.sound.context;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-
-      osc.type = type || "square";
-      osc.frequency.setValueAtTime(freq, t);
-
-      gain.gain.setValueAtTime(Math.max(0.0001, vol || 0.08), t);
-      gain.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-
-      osc.start(t);
-      osc.stop(t + dur);
-    } catch (e) { }
-  }
-
-  beep(freq, dur, vol, type) {
-    try {
-      const ctx = this.scene.sound.context;
-      this.toneAt(ctx.currentTime, freq, dur, vol, type);
-    } catch (e) { }
-  }
-
-  levelUp() {
-    try {
-      const ctx = this.scene.sound.context;
-      const t = ctx.currentTime;
-      this.toneAt(t + 0.0, 700, 0.08, 0.1, "triangle");
-      this.toneAt(t + 0.09, 900, 0.08, 0.1, "triangle");
-      this.toneAt(t + 0.18, 1200, 0.1, 0.12, "triangle");
-    } catch (e) { }
-  }
-
-  explode() {
-    try {
-      const ctx = this.scene.sound.context;
-      const t = ctx.currentTime;
-      this.toneAt(t + 0.0, 220, 0.08, 0.16, "sawtooth");
-      this.toneAt(t + 0.07, 160, 0.1, 0.18, "square");
-      this.toneAt(t + 0.16, 110, 0.12, 0.2, "triangle");
-    } catch (e) { }
-  }
-}
-
-class Leaderboard {
-  constructor(storageKey, maxEntries) {
-    this.storageKey = storageKey || "cave_snake_leaderboard";
-    this.maxEntries = Math.max(3, maxEntries | 0);
-    this.entries = [];
-    this._load();
-  }
-
-  _load() {
-    try {
-      if (typeof localStorage === "undefined") return;
-      const raw = localStorage.getItem(this.storageKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed)) return;
-
-      this.entries = parsed
-        .map((e) => ({
-          name: this._normalizeName(e && e.name),
-          level: Math.max(1, (e && e.level) | 0),
-          score: Math.max(0, (((e && e.score) | 0) || (Math.max(1, (e && e.level) | 0) * 1000))),
-          t: Number((e && e.t) || 0) || Date.now(),
-        }))
-        .sort((a, b) => b.score - a.score || b.level - a.level || a.t - b.t)
-        .slice(0, this.maxEntries);
-    } catch (e) { }
-  }
-
-  _save() {
-    try {
-      if (typeof localStorage === "undefined") return;
-      localStorage.setItem(this.storageKey, JSON.stringify(this.entries));
-    } catch (e) { }
-  }
-
-  _normalizeName(name) {
-    const clean = String(name || "")
-      .toUpperCase()
-      .replace(/[^A-Z0-9]/g, "")
-      .slice(0, 3);
-    return (clean + "AAA").slice(0, 3);
-  }
-
-  getEntries() {
-    return this.entries.slice();
-  }
-
-  qualifies(score) {
-    const s = Math.max(0, score | 0);
-    if (this.entries.length < this.maxEntries) return true;
-    return s > this.entries[this.entries.length - 1].score;
-  }
-
-  add(name, score, level) {
-    const entry = {
-      name: this._normalizeName(name),
-      score: Math.max(0, score | 0),
-      level: Math.max(1, level | 0),
-      t: Date.now(),
-    };
-
-    this.entries.push(entry);
-    this.entries.sort((a, b) => b.score - a.score || b.level - a.level || a.t - b.t);
-    let rank = this.entries.indexOf(entry) + 1;
-    if (this.entries.length > this.maxEntries) {
-      // If the entry was pushed out, return null rank.
-      if (this.entries.indexOf(entry) >= this.maxEntries) rank = 0;
-      this.entries.length = this.maxEntries;
-    }
-    this._save();
-    return rank > 0 ? { rank } : null;
-  }
-}
-
-class MusicEngine {
-  constructor(audioCtx) {
-    this.ctx = audioCtx;
-    this.enabled = true;
-
-    this.master = this.ctx.createGain();
-    this.master.gain.value = 0;
-    this.master.connect(this.ctx.destination);
-
-    this.lead = this._makeVoice("square", 0.040);
-    this.harmony = this._makeVoice("square", 0.022);
-    this.bass = this._makeVoice("triangle", 0.045);
-
-    // Timing: fixed-step sequencer (eighth notes)
-    this.bpm = 142;
-    this.stepSec = (60 / this.bpm) / 2; // 8th note
-    this.baseBpm = this.bpm;
-    this.bpmPerLevel = 2;
-    this.maxBpm = 220;
-    this.level = 1;
-    this.lookahead = 0.20;
-    this.intervalMs = 25;
-
-    this._timer = null;
-    this._playing = false;
-    this._pos = 0;
-    this._nextTime = 0;
-
-    // ORIGINAL 4-bar loop (32 eighth-notes), E natural minor vibe.
-    // Notes used: D5(74) E5(76) F#5(78) G5(79) A5(81) B5(83)
-    this.leadPat = [
-      76, null, 79, null, 83, null, 79, null, // bar 1
-      81, null, 79, null, 78, null, 76, null, // bar 2
-      74, null, 76, null, 79, null, 81, null, // bar 3
-      83, null, 81, null, 79, null, 78, 76,   // bar 4 (resolve)
-    ];
-
-    // Bass hits (roots) aligned to bars: E2, D2, C2, B1 (simple progression feel).
-    // Only schedule when not null (so it can ring out).
-    this.bassPat = [
-      40, null, null, null, 40, null, null, null, // E2
-      38, null, null, null, 38, null, null, null, // D2
-      36, null, null, null, 36, null, null, null, // C2
-      35, null, null, null, 35, null, null, null, // B1
-    ];
-  }
-
-  setActive(on) {
-    if (!this.enabled) {
-      this._fadeTo(0, 0.10);
-      this._stopScheduler();
-      return;
-    }
-    if (on) this.play();
-    else this.stop();
-  }
-
-  play() {
-    this._resumeIfNeeded();
-    if (this._playing) {
-      this._fadeTo(1, 0.18);
-      return;
-    }
-    this._playing = true;
-    this._pos = 0;
-    this._nextTime = this.ctx.currentTime + 0.06;
-    this._fadeTo(1, 0.22);
-    this._startScheduler();
-  }
-
-  stop() {
-    this._fadeTo(0, 0.18);
-    this._stopScheduler();
-    this._playing = false;
-  }
-
-  setEnabled(v) {
-    this.enabled = !!v;
-    if (!this.enabled) this.stop();
-  }
-
-  setLevel(level) {
-    const nextLevel = Math.max(1, level | 0);
-    if (nextLevel === this.level) return;
-    this.level = nextLevel;
-
-    const nextBpm = Math.min(
-      this.maxBpm,
-      this.baseBpm + (this.level - 1) * this.bpmPerLevel
-    );
-    if (nextBpm === this.bpm) return;
-
-    this.bpm = nextBpm;
-    this.stepSec = (60 / this.bpm) / 2;
-  }
-
-  _startScheduler() {
-    if (this._timer) return;
-    this._timer = setInterval(() => this._tick(), this.intervalMs);
-  }
-
-  _stopScheduler() {
-    if (!this._timer) return;
-    clearInterval(this._timer);
-    this._timer = null;
-  }
-
-  _tick() {
-    const now = this.ctx.currentTime;
-    while (this._nextTime < now + this.lookahead) {
-      this._scheduleStep(this._pos, this._nextTime);
-      this._pos = (this._pos + 1) % this.leadPat.length;
-      this._nextTime += this.stepSec;
+      const off = y * RW;
+      for (let x = 0; x < RW; x++) {
+        // TEX is power-of-two => fast wrap with bitmask
+        const tx = ((fx * TEX) | 0) & (TEX - 1);
+        const ty = ((fy * TEX) | 0) & (TEX - 1);
+        const focus = colFocus[x] * torch;          // center brighter, edges darker
+        const s = clamp((shadeRow * focus) | 0, 0, SH - 1);
+        const base = s * TEXN;
+        px[off + x] = texArr[base + ty * TEX + tx];
+        fx += stepX;
+        fy += stepY;
+      }
     }
   }
 
-  _scheduleStep(i, t) {
-    const lead = this.leadPat[i];
-    const harm = this._harmonyNote(lead);
-    const bass = this.bassPat[i];
+  function drawIntroScreen() {
+    g.fillStyle = "#070A10";
+    g.fillRect(0, 0, RW, RH);
 
-    // Lead & harmony: schedule rests explicitly (silence on rests)
-    this._note(this.lead, t, lead, this.stepSec * 0.92);
-    this._note(this.harmony, t, harm, this.stepSec * 0.90);
+    g.fillStyle = "#eaf4ff";
+    g.font = "20px monospace";
+    g.fillText("CAVE RAY", (RW / 2 - 55) | 0, 42);
 
-    // Bass: only schedule when there is a note, so it doesn't get hard-cut by rests
-    if (bass != null) this._note(this.bass, t, bass, this.stepSec * 1.90);
+    g.fillStyle = "#b7d4f2";
+    g.font = "12px monospace";
+    g.fillText("SURVIVE 3 FLOORS, DEFEAT THE BOSS, ESCAPE.", 36, 66);
+
+    g.fillStyle = "#9fc4ea";
+    g.fillText("MOVE: WASD      TURN: Q / E or MOUSE", 36, 92);
+    g.fillText("FIRE: CLICK / SPACE      SWITCH: 1 / 2", 36, 108);
+    g.fillText("FLOOR 2: PICK UP MACHINE GUN", 36, 124);
+    g.fillText("FOLLOW THE TOP ARROW FOR OBJECTIVES", 36, 140);
+
+    g.fillStyle = "#eaf4ff";
+    g.fillText("PRESS ENTER / SPACE / CLICK TO START", 48, 164);
   }
 
-  // D I A T O N I C  3rd below (E natural minor) to keep harmony "correct".
-  // (then drop an octave for separation)
-  _harmonyNote(midi) {
-    if (midi == null) return null;
-
-    // Third below within E natural minor over the note set we use.
-    // D->B, E->C, F#->D, G->E, A->F#, B->G
-    const map = {
-      74: 71, // D5 -> B4
-      76: 72, // E5 -> C5
-      78: 74, // F#5 -> D5
-      79: 76, // G5 -> E5
-      81: 78, // A5 -> F#5
-      83: 79, // B5 -> G5
-    };
-
-    const h = map[midi];
-    return h == null ? null : h - 12; // drop 1 octave
-  }
-
-  _note(voice, t, midi, dur) {
-    const g = voice.gain.gain;
-
-    if (midi == null) {
-      g.setValueAtTime(0, t);
+  function renderFrame() {
+    if (state === "intro") {
+      drawIntroScreen();
       return;
     }
 
-    const f = 440 * Math.pow(2, (midi - 69) / 12);
-    voice.osc.frequency.setValueAtTime(f, t);
+    const ca = Math.cos(player.a), sa = Math.sin(player.a);
 
-    const a = 0.004; // attack
-    const r = Math.min(0.06, dur * 0.35);
+    const bob = Math.sin(player.bob) * 1.35;
+    const rec = -player.recoil * 8;
+    const horizon = (RH >> 1) + bob + rec;
+    lastHorizon = horizon | 0;
+    const torch = 0.92 + 0.08 * Math.sin(performance.now() * 0.004);
 
-    g.setValueAtTime(0.0001, t);
-    g.linearRampToValueAtTime(voice.vol, t + a);
-    g.linearRampToValueAtTime(0.0001, t + dur + r);
-  }
+    // 1) floor + ceiling (perspective textured)
+    renderFloorCeil(horizon, player.a, torch);
 
-  _fadeTo(level, sec) {
-    const t = this.ctx.currentTime;
-    const target = (this.enabled ? level : 0) * 0.12; // master cap
-    const g = this.master.gain;
-    g.cancelScheduledValues(t);
-    g.setValueAtTime(g.value, t);
-    g.linearRampToValueAtTime(target, t + Math.max(0.01, sec || 0.15));
-  }
+    // 2) walls
 
-  _makeVoice(type, vol) {
-    const osc = this.ctx.createOscillator();
-    const gain = this.ctx.createGain();
-    osc.type = type;
-    gain.gain.value = 0;
-    osc.connect(gain);
-    gain.connect(this.master);
-    osc.start();
-    return { osc, gain, vol };
-  }
+    for (let x = 0; x < RW; x++) {
+      const dx = ca * rCos[x] - sa * rSin[x];
+      const dy = sa * rCos[x] + ca * rSin[x];
 
-  _resumeIfNeeded() {
-    if (this.ctx && this.ctx.state === "suspended") {
-      this.ctx.resume().catch(() => { });
+      const hit = castFrom(player.x, player.y, dx, dy);
+      const dist = hit.d;
+      zbuf[x] = dist;
+
+      const h = clamp((PROJ / dist) | 0, 0, RH);
+      const y0 = (horizon - (h >> 1)) | 0;
+      const y1 = y0 + h;
+
+      const focus = colFocus[x] * torch;
+      const s = wallShade(dist, hit.side, focus);
+
+      const tex = wallTex[hit.t] || wallTex[1];
+      const baseHi = s * TEXN;
+      const sLo = clamp(s - 3, 0, SH - 1);
+      const baseLo = sLo * TEXN;
+      const tx = clamp((hit.u * TEX) | 0, 0, TEX - 1);
+
+      const yy0 = y0 < 0 ? 0 : y0;
+      const yy1 = y1 > RH ? RH : y1;
+      const hh = (yy1 - yy0) || 1;
+
+      for (let y = yy0; y < yy1; y++) {
+        const rel = (y - yy0) / hh;
+        const base = (rel < 0.10 || rel > 0.84) ? baseLo : baseHi;   // top/bottom darker
+        const ty = clamp((((y - y0) * TEX) / (h || 1)) | 0, 0, TEX - 1);
+        px[y * RW + x] = tex[base + ty * TEX + tx];
+      }
+
+      // subtle edge outline at top/bottom of wall slice (readability)
+      const edgeS = clamp(s - 4, 0, SH - 1);
+      const edgeBase = edgeS * TEXN;
+      if (yy0 >= 0 && yy0 < RH) px[yy0 * RW + x] = tex[edgeBase + 0 * TEX + tx];
+      const yb = yy1 - 1;
+      if (yb >= 0 && yb < RH) px[yb * RW + x] = tex[edgeBase + (TEX - 1) * TEX + tx];
+    }
+
+    // 3) enemies (far -> near)
+    const enemySprites = [];
+    const ord = enemies.map((e, i) => {
+      const dx = e.x - player.x, dy = e.y - player.y;
+      return { i, d: dx * dx + dy * dy };
+    }).sort((a, b) => b.d - a.d);
+
+    for (let k = 0; k < ord.length; k++) {
+      const e = enemies[ord[k].i];
+      const dx = e.x - player.x;
+      const dy = e.y - player.y;
+      const dist = hypot(dx, dy);
+
+      const ang = normAng(Math.atan2(dy, dx) - player.a);
+      if (Math.abs(ang) > FOV * 0.62) continue;
+
+      const sx = (RW / 2 + Math.tan(ang) * PROJ) | 0;
+      const baseSize = (PROJ / dist) | 0;
+      const size = clamp((e.type ? baseSize * 1.15 : baseSize), 6, (RH * 1.6) | 0);
+
+      const x0 = (sx - (size >> 1)) | 0;
+      if (enemyImgReady) {
+        enemySprites.push({ e, dist, size, x0 });
+        continue;
+      }
+
+      let br = e.type ? 200 : 165;
+      let bg = e.type ? 70 : 50;
+      let bb = e.type ? 60 : 55;
+
+      if (e.hurt > 0) { br = 240; bg = 240; bb = 240; }
+
+      // distance shading (reuse floorShade curve)
+      const shade = floorShade(dist);
+      const f = 0.22 + 0.78 * (shade / (SH - 1));
+      br = (br * f + FOG_R * (1 - f) * 0.6) | 0;
+      bg = (bg * f + FOG_G * (1 - f) * 0.6) | 0;
+      bb = (bb * f + FOG_B * (1 - f) * 0.6) | 0;
+
+      const body = pack(br, bg, bb);
+
+      for (let xx = 0; xx < size; xx++) {
+        const pxX = x0 + xx;
+        if (pxX < 0 || pxX >= RW) continue;
+        if (dist >= zbuf[pxX]) continue;
+
+        const u = (xx / size) * 2 - 1;
+        const cut = 1 - u * u;
+        if (cut <= 0) continue;
+
+        const hh = (size * (0.35 + 0.65 * cut)) | 0;
+        const yy = (horizon - (hh >> 1)) | 0;
+        const yA = yy < 0 ? 0 : yy;
+        const yB = (yy + hh) > RH ? RH : (yy + hh);
+
+        for (let y = yA; y < yB; y++) {
+          px[y * RW + pxX] = body;
+        }
+      }
+    }
+
+    if (boss.alive && enemyImgReady) {
+      const dx = boss.x - player.x, dy = boss.y - player.y;
+      const dist = hypot(dx, dy);
+      const ang = normAng(Math.atan2(dy, dx) - player.a);
+      if (Math.abs(ang) < FOV * 0.70) {
+        const sx = (RW / 2 + Math.tan(ang) * PROJ) | 0;
+        const baseSize = (PROJ / dist) | 0;
+        const size = clamp((baseSize * 2.0) | 0, 12, (RH * 2.0) | 0);
+        const x0 = (sx - (size >> 1)) | 0;
+        enemySprites.push({ e: boss, dist, size, x0 });
+      }
+    }
+    enemySprites.sort((a, b) => b.dist - a.dist);
+
+    // 4) stairs / exit portal
+    if (stairs.active) {
+      const dx = stairs.x - player.x;
+      const dy = stairs.y - player.y;
+      const dist = hypot(dx, dy);
+      const ang = normAng(Math.atan2(dy, dx) - player.a);
+      if (Math.abs(ang) < FOV * 0.72) {
+        const sx = (RW / 2 + Math.tan(ang) * PROJ) | 0;
+        const size = clamp(((PROJ / dist) | 0), 10, 64);
+        const x0 = (sx - (size >> 1)) | 0;
+        const hh = clamp((size * 1.50) | 0, 12, (RH * 1.65) | 0);
+        const yy = (horizon - (hh >> 1)) | 0;
+        const yA = yy < 0 ? 0 : yy;
+        const yB = (yy + hh) > RH ? RH : (yy + hh);
+
+        const pulse = 0.55 + 0.45 * Math.sin(stairs.pulse * 6.0);
+        const shade = floorShade(dist);
+        const f = 0.24 + 0.76 * (shade / (SH - 1));
+        const frame = pack((28 * f) | 0, (25 * f) | 0, (20 * f) | 0);
+        const stepA = pack((clamp(180 + 45 * pulse, 0, 255) * f) | 0, (clamp(130 + 25 * pulse, 0, 255) * f) | 0, (50 * f) | 0);
+        const stepB = pack((clamp(130 + 35 * pulse, 0, 255) * f) | 0, (clamp(88 + 20 * pulse, 0, 255) * f) | 0, (34 * f) | 0);
+        const arrow = pack((clamp(235 + 20 * pulse, 0, 255) * f) | 0, (clamp(210 + 20 * pulse, 0, 255) * f) | 0, (150 * f) | 0);
+
+        for (let xx = 0; xx < size; xx++) {
+          const pxX = x0 + xx;
+          if (pxX < 0 || pxX >= RW) continue;
+          if (dist >= zbuf[pxX]) continue;
+          const u = (xx / size) * 2 - 1;
+          const edgeX = Math.abs(u) > 0.47;
+
+          for (let y = yA; y < yB; y++) {
+            const v = ((y - yy) / (hh || 1)) * 2 - 1;
+            const edgeY = Math.abs(v) > 0.47;
+            const stepBand = (((y - yy) >> 2) & 1) === 0;
+
+            let col = frame;
+            if (!edgeX && !edgeY) col = stepBand ? stepA : stepB;
+
+            // Up-arrow cue in center.
+            if (v > -0.44 && v < -0.16 && Math.abs(u) < 0.09) col = arrow;
+            if (v > -0.28 && v < -0.18 && Math.abs(u) < 0.25 - Math.abs(v + 0.23) * 1.8) col = arrow;
+
+            px[y * RW + pxX] = col;
+          }
+        }
+      }
+    } else if (floorIndex === FLOOR_COUNT - 1) {
+      const dx = exitGate.x - player.x;
+      const dy = exitGate.y - player.y;
+      const dist = hypot(dx, dy);
+      const ang = normAng(Math.atan2(dy, dx) - player.a);
+      if (Math.abs(ang) < FOV * 0.72) {
+        const sx = (RW / 2 + Math.tan(ang) * PROJ) | 0;
+        const size = clamp(((PROJ / dist) | 0), 12, 72);
+        const x0 = (sx - (size >> 1)) | 0;
+        const hh = clamp((size * 1.65) | 0, 14, (RH * 1.75) | 0);
+        const yy = (horizon - (hh >> 1)) | 0;
+        const yA = yy < 0 ? 0 : yy;
+        const yB = (yy + hh) > RH ? RH : (yy + hh);
+
+        const pulse = 0.55 + 0.45 * Math.sin(exitGate.pulse * 6.2);
+        const shade = floorShade(dist);
+        const f = 0.24 + 0.76 * (shade / (SH - 1));
+        const frameCol = pack((22 * f) | 0, (24 * f) | 0, (30 * f) | 0);
+        const closedA = pack((120 * f) | 0, (42 * f) | 0, (42 * f) | 0);
+        const closedB = pack((70 * f) | 0, (22 * f) | 0, (22 * f) | 0);
+        const openOuter = pack((28 * f) | 0, (95 * f) | 0, (145 * f) | 0);
+        const openRing = pack(
+          (clamp(95 + 120 * pulse, 0, 255) * f) | 0,
+          (clamp(170 + 75 * pulse, 0, 255) * f) | 0,
+          (clamp(230 + 20 * pulse, 0, 255) * f) | 0
+        );
+        const openCoreA = pack((28 * f) | 0, (clamp(150 + 90 * pulse, 0, 255) * f) | 0, (clamp(225 + 25 * pulse, 0, 255) * f) | 0);
+        const openCoreB = pack((18 * f) | 0, (clamp(95 + 65 * pulse, 0, 255) * f) | 0, (clamp(170 + 20 * pulse, 0, 255) * f) | 0);
+
+        for (let xx = 0; xx < size; xx++) {
+          const pxX = x0 + xx;
+          if (pxX < 0 || pxX >= RW) continue;
+          if (dist >= zbuf[pxX]) continue;
+          const u = (xx / size) * 2 - 1;
+          const edgeX = Math.abs(u) > 0.47;
+
+          for (let y = yA; y < yB; y++) {
+            const v = ((y - yy) / (hh || 1)) * 2 - 1;
+            const edgeY = Math.abs(v) > 0.47;
+
+            let col = frameCol;
+            if (!edgeX && !edgeY) {
+              if (!exitGate.open) {
+                const stripe = ((xx + ((y + ((exitGate.pulse * 26) | 0)) >> 1)) & 7) < 2;
+                col = stripe ? closedA : closedB;
+              } else {
+                const ring = Math.abs(Math.hypot(u * 1.08, v * 0.92) - 0.60) < 0.08;
+                const core = Math.hypot(u * 1.15, v * 0.95) < 0.52;
+                if (ring) col = openRing;
+                else if (core) {
+                  const wave = Math.sin(v * 14 + exitGate.pulse * 8 + u * 5);
+                  col = wave > 0 ? openCoreA : openCoreB;
+                } else col = openOuter;
+              }
+            }
+            px[y * RW + pxX] = col;
+          }
+        }
+      }
+    }
+
+    // 5) machine gun pickup billboard
+    if (mgPickup.active) {
+      const dx = mgPickup.x - player.x;
+      const dy = mgPickup.y - player.y;
+      const dist = hypot(dx, dy);
+      const ang = normAng(Math.atan2(dy, dx) - player.a);
+      if (Math.abs(ang) < FOV * 0.65) {
+        const sx = (RW / 2 + Math.tan(ang) * PROJ) | 0;
+        const size = clamp(((PROJ / dist) | 0), 7, 44);
+        const x0 = (sx - (size >> 1)) | 0;
+
+        const shade = floorShade(dist);
+        const f = 0.22 + 0.78 * (shade / (SH - 1));
+        const body = pack((205 * f) | 0, (148 * f) | 0, (74 * f) | 0);
+        const dark = pack((85 * f) | 0, (62 * f) | 0, (38 * f) | 0);
+        const hi = pack((250 * f) | 0, (220 * f) | 0, (150 * f) | 0);
+
+        for (let xx = 0; xx < size; xx++) {
+          const pxX = x0 + xx;
+          if (pxX < 0 || pxX >= RW) continue;
+          if (dist >= zbuf[pxX]) continue;
+
+          const hh = (size * 0.92) | 0;
+          const yy = (horizon - (hh >> 1)) | 0;
+          const yA = yy < 0 ? 0 : yy;
+          const yB = (yy + hh) > RH ? RH : (yy + hh);
+          const u = xx / (size || 1);
+
+          for (let y = yA; y < yB; y++) {
+            const v = (y - yy) / (hh || 1);
+            let col = 0;
+            const stock = (u > 0.10 && u < 0.34 && v > 0.35 && v < 0.70);
+            const bodyRect = (u > 0.26 && u < 0.70 && v > 0.32 && v < 0.58);
+            const barrel = (u >= 0.66 && u < 0.94 && v > 0.40 && v < 0.52);
+            const grip = (u > 0.44 && u < 0.56 && v > 0.56 && v < 0.86);
+            const sight = (u > 0.50 && u < 0.62 && v > 0.20 && v < 0.30);
+
+            if (stock || bodyRect || barrel || grip) col = body;
+            if (barrel || grip) col = dark;
+            if (sight) col = hi;
+            if (col) px[y * RW + pxX] = col;
+          }
+        }
+      }
+    }
+
+    // 6) medkit billboard
+    if (med.x !== 0) {
+      const dx = med.x - player.x;
+      const dy = med.y - player.y;
+      const dist = hypot(dx, dy);
+      const ang = normAng(Math.atan2(dy, dx) - player.a);
+      if (Math.abs(ang) < FOV * 0.65) {
+        const sx = (RW / 2 + Math.tan(ang) * PROJ) | 0;
+        const size = clamp(((PROJ / dist) | 0), 6, 40);
+        const x0 = (sx - (size >> 1)) | 0;
+
+        const shade = floorShade(dist);
+        const f = 0.22 + 0.78 * (shade / (SH - 1));
+        const col = pack((40 * f) | 0, (220 * f) | 0, (80 * f) | 0);
+        const cross = pack((240 * f) | 0, (240 * f) | 0, (240 * f) | 0);
+
+        for (let xx = 0; xx < size; xx++) {
+          const pxX = x0 + xx;
+          if (pxX < 0 || pxX >= RW) continue;
+          if (dist >= zbuf[pxX]) continue;
+
+          const hh = (size * 1.15) | 0;
+          const yy = (horizon - (hh >> 1)) | 0;
+          const yA = yy < 0 ? 0 : yy;
+          const yB = (yy + hh) > RH ? RH : (yy + hh);
+
+          const mid = size >> 1;
+          for (let y = yA; y < yB; y++) {
+            let pcol = col;
+            const v = (y - yy) / (hh || 1);
+
+            const cx = Math.abs(xx - mid) < (size * 0.08);
+            const cy = Math.abs(v - 0.55) < 0.06;
+            if (cx || cy) pcol = cross;
+
+            px[y * RW + pxX] = pcol;
+          }
+        }
+      }
+    }
+
+    // commit pixel buffer
+    g.putImageData(img, 0, 0);
+    drawEnemySprites(enemySprites, horizon);
+
+    // world-only post tint + threat darken (HUD stays clean)
+    g.fillStyle = "rgba(25,40,80,0.06)";
+    g.fillRect(0, 0, RW, RH);
+    if (threatLevel > 0) {
+      g.fillStyle = `rgba(0,0,0,${0.10 * threatLevel})`;
+      g.fillRect(0, 0, RW, RH);
+    }
+
+    drawSparks();
+    drawImpactLights();
+
+    // HUD + minimap + objective + crosshair + weapon
+    drawHUD();
+    drawMinimap();
+    drawObjectiveArrow();
+
+    const cx = RW >> 1, cy = (horizon | 0);
+    const spread = 6 + (player.recoil * 22) | 0;
+
+    g.fillStyle = "rgba(234,244,255,0.90)";
+    g.fillRect(cx - spread, cy, spread * 2, 1);
+    g.fillRect(cx, cy - spread, 1, spread * 2);
+
+    if (hitMark > 0) {
+      g.fillStyle = "rgba(255,107,107,0.9)";
+      g.fillRect(cx - 9, cy - 9, 18, 2);
+      g.fillRect(cx - 9, cy + 7, 18, 2);
+      g.fillRect(cx - 9, cy - 9, 2, 18);
+      g.fillRect(cx + 7, cy - 9, 2, 18);
+    }
+
+    drawWeapon(horizon);
+
+    // damage / flash overlays
+    if (flash > 0) {
+      g.fillStyle = "rgba(255,255,255,0.16)";
+      g.fillRect(0, 0, RW, RH);
+    }
+    if (player.hurt > 0) {
+      const a = clamp(player.hurt, 0, 1);
+      g.fillStyle = `rgba(255,60,60,${0.20 * a})`;
+      g.fillRect(0, 0, RW, RH);
+    }
+    if (player.blind > 0) {
+      const a = clamp(player.blind, 0, 1);
+      const pulse = 0.55 + 0.45 * Math.sin(performance.now() * 0.006 + player.dizzy * 6.0);
+
+      // Even full-screen blindness veil (not center-weighted).
+      g.fillStyle = `rgba(0,0,0,${0.22 + 0.46 * a})`;
+      g.fillRect(0, 0, RW, RH);
+
+      // Subtle rolling haze so blindness feels alive, not just a flat dim.
+      g.globalCompositeOperation = "lighter";
+      g.fillStyle = `rgba(46,56,74,${(0.04 + 0.10 * a) * pulse})`;
+      for (let y = 0; y < RH; y += 10) {
+        const h = 4 + (((y >> 3) + ((performance.now() * 0.01) | 0)) & 3);
+        g.fillRect(0, y, RW, h);
+      }
+      g.globalCompositeOperation = "source-over";
+    }
+
+    if (jumpscareT > 0) {
+      const t = clamp(jumpscareT / BOSS_JUMPSCARE_DUR, 0, 1);
+      const flick = 0.55 + 0.45 * Math.sin(performance.now() * 0.11);
+      const a = clamp((0.70 + 0.30 * t) * flick, 0, 1);
+      const spr = bossImgHurt || bossImg;
+      const j = (0.30 + 0.70 * t) * 20;
+      const pop = 1.05 + 0.26 * t;
+      const oxJ = (Math.random() - 0.5) * j;
+      const oyJ = (Math.random() - 0.5) * j * 0.65;
+
+      g.save();
+      g.imageSmoothingEnabled = true;
+      g.fillStyle = `rgba(0,0,0,${0.14 + 0.22 * t})`;
+      g.fillRect(0, 0, RW, RH);
+      g.translate((RW * 0.5) + oxJ, (RH * 0.5) + oyJ);
+      g.scale(pop, pop);
+      g.globalAlpha = a;
+      g.drawImage(spr, -RW * 0.5, -RH * 0.5, RW, RH);
+      g.globalAlpha = 0.34 * t;
+      g.fillStyle = "rgba(255,35,35,1)";
+      g.fillRect(-RW * 0.5, -RH * 0.5, RW, RH);
+      g.restore();
+    }
+
+    // CRT overlays on top
+    g.globalAlpha = 1;
+    g.drawImage(overlays.scan, 0, 0);
+    g.drawImage(overlays.vig, 0, 0);
+
+    // Not locked hint
+    if (!locked && state === "play") {
+      g.fillStyle = "rgba(0,0,0,0.45)";
+      g.fillRect(0, RH - 20, RW, 20);
+      g.fillStyle = "#b7d4f2";
+      g.font = "11px monospace";
+      g.fillText("Click to lock mouse", 6, RH - 7);
     }
   }
-}
-// ---------- RNG ----------
-class Rng {
-  constructor(seed) {
-    this.s = (seed >>> 0) || 0x12345678;
-  }
-  nextU32() {
-    let x = this.s;
-    x ^= x << 13;
-    x ^= x >>> 17;
-    x ^= x << 5;
-    this.s = x >>> 0;
-    return this.s;
-  }
-  next() {
-    return this.nextU32() / 4294967296;
-  }
-  int(n) {
-    return (this.next() * n) | 0;
-  }
-}
 
-// ---------- Helpers ----------
-function initPixelText(text, pad) {
-  if (!text) return text;
-  const p = pad == null ? 2 : pad;
-  text.setPadding(p, p, p, p);
-  text.setLineSpacing(2);
-  return text;
-}
+  function drawHUD() {
+    const hp = Math.max(0, player.hp | 0);
 
-function clamp(v, a, b) {
-  return v < a ? a : v > b ? b : v;
-}
+    g.fillStyle = "rgba(0,0,0,0.35)";
+    g.fillRect(6, 6, 124, 8);
+    g.fillStyle = hp > 30 ? "rgba(43,240,111,0.9)" : "rgba(255,107,107,0.9)";
+    g.fillRect(6, 6, Math.max(0, Math.min(124, (hp / 100) * 124)) | 0, 8);
+    if (boss.alive) {
+      const w = 140, h = 8;
+      const x = (RW / 2 - w / 2) | 0;
+      const y = 4;
 
-function toScreen(x, y, camBottom) {
-  return {
-    x: GRID_X0 + x * TILE,
-    y: PLAY_BOTTOM - (y - camBottom + 1) * TILE,
-  };
-}
+      g.fillStyle = "rgba(0,0,0,0.55)";
+      g.fillRect(x, y, w, h);
+      const p = clamp(boss.hp / (boss.max || 1), 0, 1);
 
-function cellCenter(x, y, camBottom) {
-  const r = toScreen(x, y, camBottom);
-  return { x: r.x + TILE * 0.5, y: r.y + TILE * 0.5 };
-}
+      g.fillStyle = "rgba(255,107,107,0.92)";
+      g.fillRect(x, y, (w * p) | 0, h);
+    }
+
+    if (state === "play") {
+      let obj = "";
+      if (boss.alive) obj = "OBJECTIVE: DEFEAT BOSS";
+      else if (stairs.active && mgPickup.active && !machineUnlocked) obj = "OBJECTIVE: FIND STAIRS (MG OPTIONAL)";
+      else if (stairs.active) obj = "OBJECTIVE: FIND STAIRS";
+      else if (mgPickup.active) obj = "OBJECTIVE: FIND MACHINE GUN";
+      else if (exitGate.x !== 0 && !exitGate.open) obj = "OBJECTIVE: UNLOCK EXIT";
+      else if (exitGate.x !== 0 && exitGate.open) obj = "OBJECTIVE: REACH EXIT";
+
+      if (obj) {
+        g.fillStyle = "rgba(0,0,0,0.45)";
+        g.fillRect(132, 4, 184, 12);
+        g.fillStyle = "#cfe5ff";
+        g.font = "10px monospace";
+        g.fillText(obj, 136, 13);
+      }
+    }
+
+    if (state === "dead") {
+      g.fillStyle = "rgba(0,0,0,0.70)";
+      g.fillRect(0, 0, RW, RH);
+      g.fillStyle = "#eaf4ff";
+      g.font = "18px monospace";
+      g.fillText("GAME OVER", (RW / 2 - 55) | 0, (RH / 2 - 10) | 0);
+      g.fillStyle = "#b7d4f2";
+      g.font = "12px monospace";
+      g.fillText("Press X, R or Enter to restart", (RW / 2 - 102) | 0, (RH / 2 + 30) | 0);
+    }
+
+    if (state === "won") {
+      g.fillStyle = "rgba(0,0,0,0.70)";
+      g.fillRect(0, 0, RW, RH);
+      g.fillStyle = "#eaf4ff";
+      g.font = "18px monospace";
+      g.fillText("YOU ESCAPED", (RW / 2 - 58) | 0, (RH / 2 - 10) | 0);
+      g.fillStyle = "#b7d4f2";
+      g.font = "12px monospace";
+      g.fillText("Press X, R or Enter to play again", (RW / 2 - 114) | 0, (RH / 2 + 30) | 0);
+    }
+  }
+
+  function drawWeapon(horizon) {
+    const bob = Math.sin(player.bob * 0.9) * 3;
+    const rec = player.recoil * 16;
+    const isMG = WEAPONS[weaponIndex].auto;
+
+    const baseY = (RH - 6 + bob + rec) | 0;
+    const baseX = (RW >> 1);
+
+    g.fillStyle = "rgba(0,0,0,0.50)";
+    g.fillRect(baseX - 54, baseY - 50, 108, 50);
+
+    if (isMG) {
+      g.fillStyle = "rgba(85,105,130,0.95)";
+      g.fillRect(baseX - 48, baseY - 45, 96, 41);
+      g.fillStyle = "rgba(35,50,70,0.95)";
+      g.fillRect(baseX - 16, baseY - 46, 32, 20);
+      g.fillStyle = "rgba(18,22,30,0.95)";
+      g.fillRect(baseX - 10, baseY - 56, 20, 12); // thicker barrel block
+      g.fillRect(baseX + 8, baseY - 53, 24, 6);   // extended barrel
+      g.fillStyle = "rgba(120,95,55,0.90)";
+      g.fillRect(baseX - 34, baseY - 20, 10, 16); // side mag hint
+      g.strokeStyle = "rgba(234,244,255,0.24)";
+      g.strokeRect(baseX - 48, baseY - 45, 96, 41);
+    } else {
+      g.fillStyle = "rgba(95,120,150,0.92)";
+      g.fillRect(baseX - 46, baseY - 44, 92, 40);
+      g.fillStyle = "rgba(35,50,70,0.95)";
+      g.fillRect(baseX - 12, baseY - 44, 24, 18);
+      g.fillStyle = "rgba(18,22,30,0.95)";
+      g.fillRect(baseX - 7, baseY - 48, 14, 10);
+      g.strokeStyle = "rgba(234,244,255,0.25)";
+      g.strokeRect(baseX - 46, baseY - 44, 92, 40);
+    }
+
+    if (flash > 0) {
+      g.fillStyle = "rgba(255,240,120,0.85)";
+      g.fillRect(baseX - 2, baseY - (isMG ? 62 : 58), 4, 10);
+      g.fillStyle = "rgba(255,255,255,0.55)";
+      g.fillRect(baseX - 1, baseY - (isMG ? 66 : 62), 2, 6);
+    }
+  }
+
+  function drawMinimap() {
+    const mm = 66;
+    const x0 = 6, y0 = 30;
+
+    g.fillStyle = "rgba(0,0,0,0.35)";
+    g.fillRect(x0 - 2, y0 - 2, mm + 4, mm + 4);
+
+    const sX = mm / MW, sY = mm / MH;
+
+    for (let y = 0; y < MH; y++) {
+      for (let x = 0; x < MW; x++) {
+        const t = grid[y * MW + x];
+        if (!t) continue;
+        g.fillStyle = t === 1 ? "rgba(140,120,170,0.85)" : t === 2 ? "rgba(90,150,210,0.85)" : "rgba(60,150,80,0.85)";
+        g.fillRect((x0 + x * sX) | 0, (y0 + y * sY) | 0, (sX + 0.2) | 0, (sY + 0.2) | 0);
+      }
+    }
+
+    if (med.x !== 0) {
+      g.fillStyle = "rgba(43,240,111,0.95)";
+      g.fillRect((x0 + med.x * sX) | 0, (y0 + med.y * sY) | 0, 2, 2);
+    }
+
+    if (mgPickup.active) {
+      g.fillStyle = "rgba(255,170,90,0.95)";
+      g.fillRect((x0 + mgPickup.x * sX) | 0, (y0 + mgPickup.y * sY) | 0, 3, 3);
+    }
+
+    if (stairs.active) {
+      g.fillStyle = "rgba(255,205,90,0.95)";
+      g.fillRect((x0 + stairs.x * sX) | 0, (y0 + stairs.y * sY) | 0, 3, 3);
+    }
+
+    if (!stairs.active && exitGate.x !== 0) {
+      g.fillStyle = exitGate.open ? "rgba(110,240,255,0.95)" : "rgba(180,80,80,0.95)";
+      g.fillRect((x0 + exitGate.x * sX) | 0, (y0 + exitGate.y * sY) | 0, 3, 3);
+    }
+
+    g.fillStyle = "rgba(255,107,107,0.90)";
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      g.fillRect((x0 + e.x * sX) | 0, (y0 + e.y * sY) | 0, 2, 2);
+    }
+
+    const px0 = (x0 + player.x * sX) | 0;
+    const py0 = (y0 + player.y * sY) | 0;
+    g.fillStyle = "rgba(234,244,255,0.95)";
+    g.fillRect(px0 - 1, py0 - 1, 3, 3);
+
+    const fx = px0 + Math.cos(player.a) * 6;
+    const fy = py0 + Math.sin(player.a) * 6;
+    g.strokeStyle = "rgba(234,244,255,0.55)";
+    g.beginPath();
+    g.moveTo(px0, py0);
+    g.lineTo(fx, fy);
+    g.stroke();
+
+    const fa = player.a - FOV * 0.33;
+    const fb = player.a + FOV * 0.33;
+    g.strokeStyle = "rgba(160,210,255,0.35)";
+    g.beginPath();
+    g.moveTo(px0, py0);
+    g.lineTo(px0 + Math.cos(fa) * 7, py0 + Math.sin(fa) * 7);
+    g.moveTo(px0, py0);
+    g.lineTo(px0 + Math.cos(fb) * 7, py0 + Math.sin(fb) * 7);
+    g.stroke();
+  }
+
+  // ----------------- Main loop -----------------
+  let last = performance.now();
+  loadMap(generateMapLines());
+
+  function tick(t) {
+    const dt = Math.min(0.05, (t - last) / 1000);
+    last = t;
+    if (noteT > 0) noteT = Math.max(0, noteT - dt);
+    if (jumpscareT > 0) jumpscareT = Math.max(0, jumpscareT - dt);
+    updateSparks(dt);
+    updateImpactLights(dt);
+    drawBossCastFX();
+
+    if (state === "play") {
+      if (shootCd > 0) shootCd -= dt;
+      if (flash > 0) flash -= dt;
+      if (hitMark > 0) hitMark -= dt;
+      if (player.recoil > 0) player.recoil = Math.max(0, player.recoil - dt * 3.6);
+      if (player.hurt > 0) player.hurt = Math.max(0, player.hurt - dt * 1.8);
+      if (player.dizzy > 0) player.dizzy = Math.max(0, player.dizzy - dt * 0.42);
+      if (player.blind > 0) player.blind = Math.max(0, player.blind - dt * 0.35);
+      if (shake > 0) shake = Math.max(0, shake - dt * 3.2);
+
+      if (triggerHeld && WEAPONS[weaponIndex].auto) shoot();
+
+      movePlayer(dt);
+      updateEnemies(dt);
+      updateBoss(dt);
+      updatePickup(dt);
+      updateExit(dt);
+
+      let nearestD2 = 1e9;
+      for (let i = 0; i < enemies.length; i++) {
+        const e = enemies[i];
+        const dx = e.x - player.x, dy = e.y - player.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < nearestD2) nearestD2 = d2;
+      }
+      if (boss.alive) {
+        const dx = boss.x - player.x, dy = boss.y - player.y;
+        const d2 = dx * dx + dy * dy;
+        if (d2 < nearestD2) nearestD2 = d2;
+      }
+      if (nearestD2 < 64) {
+        threatLevel = clamp((8 - Math.sqrt(nearestD2)) / 7, 0, 1);
+        audio.threat(threatLevel, dt);
+      } else {
+        threatLevel = 0;
+        audio.threat(0, dt);
+      }
+
+      if (player.hp <= 0) {
+        player.hp = 0;
+        state = "dead";
+        audio.stopMusic();
+      }
+    } else {
+      threatLevel = 0;
+      audio.threat(0, dt);
+      audio.footstep(0, dt);
+      if (player.dizzy > 0) player.dizzy = Math.max(0, player.dizzy - dt * 0.8);
+      if (player.blind > 0) player.blind = Math.max(0, player.blind - dt * 0.8);
+    }
+
+    renderFrame();
+
+    // present with subtle screen shake
+    const sh = shake > 0 ? shake : 0;
+    const dz = (state === "play") ? clamp(player.dizzy, 0, 1) : 0;
+    const js = jumpscareT > 0 ? clamp(jumpscareT / BOSS_JUMPSCARE_DUR, 0, 1) : 0;
+    const sx = (sh ? ((Math.random() - 0.5) * sh * 10 * scale) : 0)
+      + (dz ? Math.sin(t * 0.012) * dz * 7 * scale : 0)
+      + (js ? (Math.random() - 0.5) * (16 * js * scale) : 0);
+    const sy = (sh ? ((Math.random() - 0.5) * sh * 8 * scale) : 0)
+      + (dz ? Math.cos(t * 0.016) * dz * 6 * scale : 0)
+      + (js ? (Math.random() - 0.5) * (12 * js * scale) : 0);
+    const roll = dz ? Math.sin(t * 0.009) * dz * 0.032 : 0;
+
+    ctx.clearRect(0, 0, c.width, c.height);
+    if (roll) {
+      const cxp = c.width * 0.5, cyp = c.height * 0.5;
+      ctx.save();
+      ctx.translate(cxp, cyp);
+      ctx.rotate(roll);
+      ctx.drawImage(buf, 0, 0, RW, RH, (ox + sx) - cxp, (oy + sy) - cyp, RW * scale, RH * scale);
+      ctx.restore();
+    } else {
+      ctx.drawImage(buf, 0, 0, RW, RH, (ox + sx) | 0, (oy + sy) | 0, RW * scale, RH * scale);
+    }
+
+    requestAnimationFrame(tick);
+  }
+
+  state = "intro";
+  requestAnimationFrame(tick);
+})();
+// i love pupu <3
+// i love gluglu <3
+// i love tarche <3
+// i love heibor <3
+// i love celestia <3
+// i love everyone <3
