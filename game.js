@@ -25,7 +25,7 @@
   const FIRE_DMG = 16;
   const FIRE_TELEGRAPH = 0.32;
   const FIRE_TRAIL_LEN = 0.24;
-  const BASE_ENEMIES = 6;
+  const BASE_ENEMIES = 8;
   const ENEMY_DETECT_R = 7.5;
   const FLOOR_COUNT = 3;
   const WEAPONS = [
@@ -500,7 +500,7 @@
   })();
 
   // ----------------- Maps -----------------
-  const MAP_W = 31, MAP_H = 31;
+  const MAP_W = 25, MAP_H = 25;
 
   function generateMapLines() {
     const w = MAP_W, h = MAP_H;
@@ -1400,6 +1400,15 @@
     return false;
   }
 
+  function canPlayerSeeBoss(dist, dx, dy) {
+    if (dist <= 0.0001) return true;
+    const rel = Math.abs(normAng(Math.atan2(dy, dx) - player.a));
+    if (rel > FOV * 0.55) return false;
+    const invD = 1 / dist;
+    const ray = castFrom(player.x, player.y, dx * invD, dy * invD);
+    return ray.d + 0.04 >= dist - BOSS_R;
+  }
+
   function updateBoss(dt) {
     if (!boss.alive) return;
     boss.spr = bossImg;
@@ -1449,7 +1458,7 @@
 
     // Jumpscare trigger: frequent enough to feel threatening when boss is near.
     jumpscareCd -= dt;
-    if (jumpscareCd <= 0 && bd < BOSS_JUMPSCARE_RANGE) {
+    if (jumpscareCd <= 0 && bd < BOSS_JUMPSCARE_RANGE && canPlayerSeeBoss(bd, bdX, bdY)) {
       const rage = 1 - clamp(boss.hp / (boss.max || 1), 0, 1);
       const nearT = 1 - clamp(bd / BOSS_JUMPSCARE_RANGE, 0, 1);
       jumpscareCd = BOSS_JUMPSCARE_CD * (0.72 - 0.30 * nearT) * (1 - 0.35 * rage);
@@ -1555,7 +1564,9 @@
     shake = 0;
 
     enemies.length = 0;
-    const startEnemies = (floorIndex === FLOOR_COUNT - 1) ? 3 : (BASE_ENEMIES + floorIndex);
+    const startEnemies = (floorIndex === FLOOR_COUNT - 1)
+      ? 5
+      : (BASE_ENEMIES + floorIndex * 2);
     for (let i = 0; i < startEnemies; i++) spawnEnemy();
 
     spawnMedkit();
@@ -1836,15 +1847,17 @@
               // Final floor pressure ramps hard as boss takes damage.
               ? (3 + ((bossRage * 18) | 0))
               : 2)
-            : (BASE_ENEMIES - 1 + floorIndex + (wave >> 2));
+            : (BASE_ENEMIES + 3 + floorIndex * 3 + (wave >> 1));
 
-          let spawnBurst = 1;
+          let spawnBurst = 2;
           if (floorIndex === FLOOR_COUNT - 1 && boss.alive) {
             spawnBurst += 1 + ((bossRage * 3) | 0); // 2..5 spawns as rage rises
             if (score > 0 && (score % 4) === 0) spawnBurst += 1 + ((bossRage * 2) | 0);
           }
-          if (score > 0 && (score % 6) === 0) {
+          if (score > 0 && (score % 4) === 0) {
             wave++;
+            spawnBurst++;
+          } else if ((floorIndex !== FLOOR_COUNT - 1) && score > 0 && (score % 3) === 0) {
             spawnBurst++;
           }
           while (spawnBurst-- > 0 && enemies.length < spawnCap) spawnEnemy();
